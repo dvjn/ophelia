@@ -1,0 +1,10 @@
+[tools]
+python = "3.13"
+
+[tasks.setup]
+description = "Fetch the upstream Helium platform repos"
+run = "git submodule update --init --recursive"
+
+[tasks.build]
+description = "Build Ophelia for this OS (pass --platform to pick another)"
+run = "python scripts/build.py"

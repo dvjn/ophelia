@@ -1,0 +1,3 @@
+[submodule "platforms/linux/upstream"]
+	path = platforms/linux/upstream
+	url = https://github.com/imputnet/helium-linux

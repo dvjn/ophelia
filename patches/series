@@ -1,0 +1,3 @@
+# Ophelia patches, applied after Helium core and the platform patches.
+# One path per line, relative to this directory, e.g.
+# ophelia/branding/rename-browser.patch
