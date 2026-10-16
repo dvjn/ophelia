@@ -15,6 +15,8 @@ import platform
 import sys
 from pathlib import Path
 
+import mtimes
+
 ROOT = Path(__file__).resolve().parent.parent
 PLATFORMS = {'Linux': 'linux'}
 
@@ -45,11 +47,14 @@ def main():
 
     target = load_platform(args.platform)
     build_dir = ROOT / 'build' / args.platform
+    src = target.source_dir(build_dir)
 
-    # TODO: target.prepare(build_dir): fetch sources, apply Helium's patches
-    # TODO: target.apply_patches(build_dir, patch_dirs(args.platform))
-    # TODO: rebrand.run(source tree)
-    # TODO: target.build(build_dir), then target.package(build_dir)
+    target.prepare(build_dir)
+    target.apply_patches(build_dir, patch_dirs(args.platform))
+    # TODO: rebrand.run(src)
+    mtimes.run(src, build_dir / 'mtimes.pickle')
+    target.build(build_dir)
+    # TODO: target.package(build_dir)
 
 
 if __name__ == '__main__':
