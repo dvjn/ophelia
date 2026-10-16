@@ -21,6 +21,18 @@ Per platform, in `platforms/<os>/`:
 - `build.py` – the platform steps `scripts/build.py` calls, driving `upstream/`
 
 
+## Building (Linux)
+
+Builds run in a distrobox made from helium-linux's builder image, so you need
+podman, distrobox and mise:
+
+```sh
+mise run setup   # fetch the upstream repos and create the box
+mise run build   # build in the box
+mise run run     # run the build with a separate profile
+```
+
+
 ## License
 
 Ophelia is licensed under GPL-3.0, see [LICENSE](LICENSE). Upstream Helium and

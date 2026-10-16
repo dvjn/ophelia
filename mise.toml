@@ -1,0 +1,26 @@
+# Local dev workflow: builds run in a distrobox made from helium-linux's
+# builder image, the browser runs on the host. Needs podman and distrobox.
+
+[tasks.setup]
+description = "Fetch the upstream repos and (re)create the ophelia distrobox from helium-linux's builder image"
+dir = "{{config_root}}"
+run = """
+set -e
+git submodule update --init --recursive
+ctx=platforms/linux/upstream/docker
+# distrobox adds your own user, so leave out the image's builder user
+{ sed '/# create builder user/,$d' $ctx/build.Dockerfile; echo 'RUN apt-get -y install quilt'; } \
+  | podman build -t ophelia-box:trixie -f - $ctx
+distrobox rm -f ophelia 2>/dev/null || true
+distrobox create --yes --name ophelia --image localhost/ophelia-box:trixie
+"""
+
+[tasks.build]
+description = "Build Ophelia in the distrobox"
+dir = "{{config_root}}"
+run = "distrobox enter ophelia -- /usr/bin/python3 scripts/build.py"
+
+[tasks.run]
+description = "Run the dev build with a separate profile"
+dir = "{{config_root}}/build/linux/src"
+run = "./out/Default/helium --user-data-dir=$HOME/.config/ophelia.dev"
