@@ -7,7 +7,7 @@ dir = "{{config_root}}"
 run = """
 set -e
 git submodule update --init --recursive
-ctx=platforms/linux/upstream/docker
+ctx=helium-linux/docker
 # distrobox adds your own user, so leave out the image's builder user
 { sed '/# create builder user/,$d' $ctx/build.Dockerfile; echo 'RUN apt-get -y install quilt'; } \
   | podman build -t ophelia-box:trixie -f - $ctx
@@ -18,7 +18,7 @@ distrobox create --yes --name ophelia --image localhost/ophelia-box:trixie
 [tasks.build]
 description = "Build Ophelia in the distrobox"
 dir = "{{config_root}}"
-run = "distrobox enter ophelia -- /usr/bin/python3 scripts/build.py"
+run = "distrobox enter ophelia -- scripts/build.sh"
 
 [tasks.run]
 description = "Run the dev build with a separate profile"

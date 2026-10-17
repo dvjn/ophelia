@@ -13,7 +13,9 @@ is recorded for next time.
 import hashlib
 import os
 import pickle
+import sys
 from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
 
 _SKIP = {'out', '.pc'}
 
@@ -81,3 +83,9 @@ def run(src, state_file):
     if old:
         print(f'{len(changed)} files touched since the last build, '
               f'{restored} of them unchanged and given their old mtime back')
+
+
+if __name__ == '__main__':
+    if len(sys.argv) != 3:
+        sys.exit(f'usage: {sys.argv[0]} <source dir> <state file>')
+    run(sys.argv[1], Path(sys.argv[2]))
