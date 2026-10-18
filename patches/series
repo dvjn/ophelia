@@ -22,6 +22,7 @@ ophelia/containers/repaint-container-tabs-on-edit.patch
 ophelia/containers/route-notifications-to-their-partition.patch
 ophelia/containers/restore-session-storage-in-containers.patch
 ophelia/containers/keep-containers-in-saved-tab-groups.patch
+ophelia/containers/move-containers-flag-to-settings.patch
 ophelia/ui/square-browser-ui-corners.patch
 ophelia/ui/square-website-corners.patch
 ophelia/ui/add-new-tab-search.patch

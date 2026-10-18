@@ -1,6 +1,6 @@
 --- a/chrome/browser/extensions/api/settings_private/prefs_util.cc
 +++ b/chrome/browser/extensions/api/settings_private/prefs_util.cc
-@@ -335,6 +335,8 @@ const PrefsUtil::TypedPrefMap& PrefsUtil
+@@ -340,6 +340,8 @@ const PrefsUtil::TypedPrefMap& PrefsUtil
        settings_api::PrefType::kBoolean;
    (*s_allowlist)[::prefs::kHeliumSquareWebCorners] =
        settings_api::PrefType::kBoolean;

@@ -39,7 +39,7 @@
      if (process) {
 --- a/chrome/browser/extensions/api/settings_private/prefs_util.cc
 +++ b/chrome/browser/extensions/api/settings_private/prefs_util.cc
-@@ -331,6 +331,8 @@ const PrefsUtil::TypedPrefMap& PrefsUtil
+@@ -336,6 +336,8 @@ const PrefsUtil::TypedPrefMap& PrefsUtil
        settings_api::PrefType::kBoolean;
    (*s_allowlist)[::prefs::kHeliumRoundedFrame] =
        settings_api::PrefType::kBoolean;

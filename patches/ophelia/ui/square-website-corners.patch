@@ -27,7 +27,7 @@
        client_data_header,
 --- a/chrome/browser/extensions/api/settings_private/prefs_util.cc
 +++ b/chrome/browser/extensions/api/settings_private/prefs_util.cc
-@@ -333,6 +333,8 @@ const PrefsUtil::TypedPrefMap& PrefsUtil
+@@ -338,6 +338,8 @@ const PrefsUtil::TypedPrefMap& PrefsUtil
        settings_api::PrefType::kBoolean;
    (*s_allowlist)[::prefs::kHeliumSquareUiCorners] =
        settings_api::PrefType::kBoolean;
