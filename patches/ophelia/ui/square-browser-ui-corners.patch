@@ -430,7 +430,15 @@
 +#endif  // CHROME_RENDERER_SQUARE_CORNERS_OBSERVER_H_
 --- a/ui/views/layout/layout_provider.cc
 +++ b/ui/views/layout/layout_provider.cc
-@@ -19,6 +19,7 @@ namespace views {
+@@ -9,6 +9,7 @@
+ #include "base/containers/fixed_flat_map.h"
+ #include "base/logging.h"
+ #include "ui/base/ui_base_features.h"
++#include "ui/compositor/layer.h"
+ #include "ui/gfx/font_list.h"
+ #include "ui/views/controls/focus_ring.h"
+ #include "ui/views/style/typography_provider.h"
+@@ -19,6 +20,7 @@ namespace views {
  namespace {
  
  LayoutProvider* g_layout_delegate = nullptr;
@@ -438,12 +446,13 @@
  
  }  // namespace
  
-@@ -38,6 +39,16 @@ LayoutProvider* LayoutProvider::Get() {
+@@ -38,6 +40,17 @@ LayoutProvider* LayoutProvider::Get() {
  }
  
  // static
 +void LayoutProvider::SetSquareCorners(bool square_corners) {
 +  g_square_corners = square_corners;
++  ui::Layer::SetSquareCorners(square_corners);
 +}
 +
 +// static
@@ -455,7 +464,7 @@
  int LayoutProvider::GetControlHeightForFont(int context,
                                              int style,
                                              const gfx::FontList& font) {
-@@ -190,6 +201,9 @@ gfx::Insets LayoutProvider::GetDialogIns
+@@ -190,6 +203,9 @@ gfx::Insets LayoutProvider::GetDialogIns
  
  int LayoutProvider::GetCornerRadiusMetric(Emphasis emphasis,
                                            const gfx::Size& size) const {
@@ -465,7 +474,7 @@
    switch (emphasis) {
      case Emphasis::kNone:
        return 0;
-@@ -226,6 +240,9 @@ ShapeSysTokens GetShapeSysToken(ShapeCon
+@@ -226,6 +242,9 @@ ShapeSysTokens GetShapeSysToken(ShapeCon
  
  int LayoutProvider::GetCornerRadiusMetric(ShapeContextTokens id,
                                            const gfx::Size& size) const {
@@ -612,14 +621,646 @@
  }
  
  void IconLabelBubbleView::SetCornerRadii(const gfx::RoundedCornersF& radii) {
---- a/chrome/browser/ui/views/omnibox/rounded_omnibox_results_frame.cc
-+++ b/chrome/browser/ui/views/omnibox/rounded_omnibox_results_frame.cc
-@@ -235,7 +235,7 @@ RoundedOmniboxResultsFrame::RoundedOmnib
-     LocationBar* location_bar,
-     bool forward_mouse_events)
-     : contents_(contents), forward_mouse_events_(forward_mouse_events) {
--  const int corner_radius = 12;
-+  const int corner_radius = views::LayoutProvider::UseSquareCorners() ? 0 : 12;
-   auto* webui_content = GetOmniboxPopupWebUIBaseContent();
-   const bool masks_to_bounds =
-       webui_content && webui_content->ShouldSizeWebViewToPreferredHeight();
+--- a/ui/views/controls/focus_ring.cc
++++ b/ui/views/controls/focus_ring.cc
+@@ -30,6 +30,7 @@
+ #include "ui/views/cascading_property.h"
+ #include "ui/views/controls/focusable_border.h"
+ #include "ui/views/controls/highlight_path_generator.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/property_effects.h"
+ #include "ui/views/view_class_properties.h"
+ #include "ui/views/view_utils.h"
+@@ -65,6 +66,9 @@ SkColor GetPaintColor(FocusRing* focus_r
+ }
+ 
+ double GetCornerRadius(float halo_thickness) {
++  if (LayoutProvider::UseSquareCorners()) {
++    return 0;
++  }
+   const double thickness = halo_thickness / 2.f;
+   return FocusRing::kDefaultCornerRadiusDp + thickness;
+ }
+--- a/chrome/browser/ui/tabs/tab_style.cc
++++ b/chrome/browser/ui/tabs/tab_style.cc
+@@ -132,6 +132,9 @@ gfx::Insets TabStyle::GetSeparatorMargin
+ }
+ 
+ int TabStyle::GetSeparatorCornerRadius() const {
++  if (views::LayoutProvider::UseSquareCorners()) {
++    return 0;
++  }
+   return GetSeparatorSize().width() / 2;
+ }
+ 
+--- a/chrome/browser/ui/views/autofill/popup/popup_notice_view.cc
++++ b/chrome/browser/ui/views/autofill/popup/popup_notice_view.cc
+@@ -53,6 +53,7 @@
+ #include "ui/views/controls/link.h"
+ #include "ui/views/controls/styled_label.h"
+ #include "ui/views/layout/box_layout.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/layout/layout_types.h"
+ #include "ui/views/style/typography.h"
+ #include "ui/views/style/typography_provider.h"
+@@ -96,7 +97,7 @@ class LinkFocusBorder : public views::Bo
+ 
+       gfx::RectF bounds(view.GetLocalBounds());
+       bounds.Inset(0.5f);
+-      canvas->DrawRoundRect(bounds, /*radius=*/2.0f, flags);
++      canvas->DrawRoundRect(bounds, /*radius=*/views::LayoutProvider::UseSquareCorners() ? 0.0f : 2.0f, flags);
+     }
+   }
+ 
+--- a/chrome/browser/ui/views/bookmarks/bookmark_drag_drop_views.cc
++++ b/chrome/browser/ui/views/bookmarks/bookmark_drag_drop_views.cc
+@@ -37,6 +37,7 @@
+ #include "ui/gfx/image/image.h"
+ #include "ui/gfx/render_text.h"
+ #include "ui/views/drag_utils.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/style/typography.h"
+ #include "ui/views/style/typography_provider.h"
+ #include "ui/views/widget/widget.h"
+@@ -117,7 +118,8 @@ class BookmarkDragImageSource : public g
+     paint_flags.setColor(
+         color_provider_->GetColor(kColorBookmarkDragImageCountBackground));
+     canvas->DrawRoundRect(gfx::RectF(count_container_rect),
+-                          kCountContainerRadius, paint_flags);
++                          views::LayoutProvider::UseSquareCorners() ? 0 : kCountContainerRadius,
++                          paint_flags);
+ 
+     // Draw the count text.
+     render_text->SetDisplayRect(count_container_rect);
+@@ -135,7 +137,8 @@ class BookmarkDragImageSource : public g
+                               kContainerHeight);
+     paint_flags.setColor(
+         color_provider_->GetColor(kColorBookmarkDragImageBackground));
+-    canvas->DrawRoundRect(container_rect, kContainerRadius, paint_flags);
++    canvas->DrawRoundRect(container_rect, views::LayoutProvider::UseSquareCorners() ? 0 : kContainerRadius,
++                          paint_flags);
+ 
+     // Draw icon container.
+     paint_flags.setColor(
+--- a/chrome/browser/ui/views/bookmarks/saved_tab_groups/saved_tab_group_button.cc
++++ b/chrome/browser/ui/views/bookmarks/saved_tab_groups/saved_tab_group_button.cc
+@@ -50,6 +50,7 @@
+ #include "ui/views/controls/button/menu_button.h"
+ #include "ui/views/controls/highlight_path_generator.h"
+ #include "ui/views/controls/menu/menu_runner.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/view_class_properties.h"
+ #include "ui/views/view_utils.h"
+ 
+@@ -187,7 +188,7 @@ void SavedTabGroupButton::PaintButtonCon
+ 
+   canvas->DrawRoundRect(gfx::RectF(kEmptyChipInsets, kEmptyChipInsets,
+                                    kEmptyChipSize, kEmptyChipSize),
+-                        kEmptyChipCornerRadius, flags);
++                        views::LayoutProvider::UseSquareCorners() ? 0.0f : kEmptyChipCornerRadius, flags);
+ }
+ 
+ std::u16string SavedTabGroupButton::GetAccessibleNameForButton() const {
+--- a/chrome/browser/ui/views/chrome_layout_provider.cc
++++ b/chrome/browser/ui/views/chrome_layout_provider.cc
+@@ -122,6 +122,19 @@ int ChromeLayoutProvider::GetDistanceMet
+     return LayoutProvider::GetDistanceMetric(metric);
+   }
+ 
++  if (UseSquareCorners()) {
++    switch (metric) {
++      case DISTANCE_SIDE_PANEL_CONTENT_RADIUS:
++      case DISTANCE_RECENT_ACTIVITY_FAVICON_CONTAINER_RADIUS:
++      case DISTANCE_RECENT_ACTIVITY_CONTAINER_RADIUS:
++      case DISTANCE_FEATURE_FIRST_RUN_INFO_BOX_ROUNDED_BORDER_RADIUS:
++      case DISTANCE_ACTION_APP_MENU_CONTAINER_CORNER_RADIUS:
++      case DISTANCE_ACTION_APP_MENU_FOOTER_BUTTON_CORNER_RADIUS:
++      case DISTANCE_ACTION_APP_MENU_BLOCK_ENTRY_CORNER_RADIUS:
++        return 0;
++    }
++  }
++
+   switch (static_cast<ChromeDistanceMetric>(metric)) {
+     case DISTANCE_CONTENT_LIST_VERTICAL_SINGLE:
+       return 4;
+--- a/chrome/browser/ui/views/download/bubble/download_toolbar_ui_controller.cc
++++ b/chrome/browser/ui/views/download/bubble/download_toolbar_ui_controller.cc
+@@ -72,6 +72,7 @@ DEFINE_USER_DATA(DownloadToolbarUIContro
+ #include "ui/views/controls/image_view.h"
+ #include "ui/views/controls/progress_ring_utils.h"
+ #include "ui/views/event_monitor.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/view_class_properties.h"
+ #include "ui/views/widget/widget.h"
+ 
+@@ -289,7 +290,7 @@ class CircleBadgeImageSource : public gf
+     gfx::RenderText& render_text = get_text_callback_.Run();
+     const gfx::Rect& badge_rect = render_text.display_rect();
+     // Set the corner radius to make the rectangle appear like a circle.
+-    const int corner_radius = badge_rect.height() / 2;
++    const int corner_radius = views::LayoutProvider::UseSquareCorners() ? 0 : badge_rect.height() / 2;
+     canvas->DrawRoundRect(badge_rect, corner_radius, flags);
+     render_text.Draw(canvas);
+   }
+--- a/chrome/browser/ui/views/page_action/multi_icon_button.cc
++++ b/chrome/browser/ui/views/page_action/multi_icon_button.cc
+@@ -31,6 +31,7 @@
+ #include "ui/views/controls/highlight_path_generator.h"
+ #include "ui/views/controls/image_view.h"
+ #include "ui/views/layout/box_layout.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/view_class_properties.h"
+ #include "ui/views/view_utils.h"
+ 
+@@ -58,9 +59,9 @@ class ClippingImageView : public views::
+   void OnPaint(gfx::Canvas* canvas) override {
+     canvas->Save();
+ 
+-    constexpr int kIconCornerRadius = 2;
++    const int kIconCornerRadius = views::LayoutProvider::UseSquareCorners() ? 0 : 2;
+     constexpr int kBorder = 2;
+-    constexpr int kBorderRadius = kIconCornerRadius + kBorder;
++    const int kBorderRadius = views::LayoutProvider::UseSquareCorners() ? 0 : kIconCornerRadius + kBorder;
+ 
+     // Clip this image into a rounded rect.
+     SkPathBuilder self_path_builder;
+--- a/chrome/browser/ui/views/passwords/move_to_account_store_bubble_view.cc
++++ b/chrome/browser/ui/views/passwords/move_to_account_store_bubble_view.cc
+@@ -68,7 +68,7 @@ class BackgroundBorderAdderImageSource :
+ 
+ void BackgroundBorderAdderImageSource::Draw(gfx::Canvas* canvas) {
+   constexpr int kBorderThickness = 1;
+-  float radius = size().width() / 2.0f;
++  float radius = views::LayoutProvider::UseSquareCorners() ? 0.0f : size().width() / 2.0f;
+   float half_thickness = kBorderThickness / 2.0f;
+   gfx::SizeF size_f(size());
+   gfx::RectF bounds(size_f);
+--- a/chrome/browser/ui/views/profiles/avatar_badge_view.cc
++++ b/chrome/browser/ui/views/profiles/avatar_badge_view.cc
+@@ -34,6 +34,7 @@
+ #include "ui/gfx/geometry/size.h"
+ #include "ui/views/controls/label.h"
+ #include "ui/views/layout/box_layout.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/style/typography.h"
+ #include "ui/views/style/typography_provider.h"
+ 
+@@ -255,7 +256,7 @@ void PaintAvatarBadgeBackground(gfx::Can
+                                 int height,
+                                 const ui::ColorProvider& color_provider,
+                                 const std::optional<SkPath>& wave_path) {
+-  float radius = height / 2.f;
++  float radius = views::LayoutProvider::UseSquareCorners() ? 0.f : height / 2.f;
+   SkPath pill_path =
+       SkPath::RRect(SkRect::MakeWH(width, height), radius, radius);
+ 
+--- a/chrome/browser/ui/views/status_bubble_views.cc
++++ b/chrome/browser/ui/views/status_bubble_views.cc
+@@ -48,6 +48,7 @@
+ #include "ui/views/controls/label.h"
+ #include "ui/views/controls/scrollbar/scroll_bar_views.h"
+ #include "ui/views/layout/fill_layout.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/property_effects.h"
+ #include "ui/views/style/typography.h"
+ #include "ui/views/style/typography_provider.h"
+@@ -477,7 +478,9 @@ void StatusView::OnPaint(gfx::Canvas* ca
+   const float scale = canvas->UndoDeviceScaleFactor();
+   const float stroke_width = kBubbleStrokeWidth * scale;
+   const float corner_radius =
+-      std::max(0.0f, kBubbleCornerRadius * scale - stroke_width / 2.0f);
++      views::LayoutProvider::UseSquareCorners()
++          ? 0.0f
++          : std::max(0.0f, kBubbleCornerRadius * scale - stroke_width / 2.0f);
+   gfx::RectF bubble_rect{gfx::SizeF(gfx::ScaleToRoundedSize(size(), scale))};
+   bubble_rect.Inset(
+       gfx::InsetsF::VH(kBubblePaintMargin * scale, kBubblePaintMargin * scale));
+--- a/chrome/browser/ui/views/tabs/shared/rounded_scroll_bar.cc
++++ b/chrome/browser/ui/views/tabs/shared/rounded_scroll_bar.cc
+@@ -19,6 +19,7 @@
+ #include "ui/views/background.h"
+ #include "ui/views/controls/scrollbar/base_scroll_bar_thumb.h"
+ #include "ui/views/layout/fill_layout.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/view_utils.h"
+ 
+ namespace tabs {
+@@ -62,7 +63,7 @@ void RoundedScrollBar::Thumb::OnPaint(gf
+   fill_bounds.Inset(gfx::InsetsF::TLBR(
+       0, 0, 0,
+       (scroll_bar_->ShouldHaveRightMargin() ? kThumbTrailingPadding : 0)));
+-  float rounded_corners = fill_bounds.width() / 2.0f;
++  float rounded_corners = views::LayoutProvider::UseSquareCorners() ? 0.0f : fill_bounds.width() / 2.0f;
+   canvas->DrawRoundRect(fill_bounds, rounded_corners, fill_flags);
+ }
+ 
+--- a/chrome/browser/ui/views/tabs/shared/tab_strip_flat_edge_button.cc
++++ b/chrome/browser/ui/views/tabs/shared/tab_strip_flat_edge_button.cc
+@@ -20,6 +20,7 @@
+ #include "ui/views/background.h"
+ #include "ui/views/controls/button/label_button_border.h"
+ #include "ui/views/controls/highlight_path_generator.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/view_class_properties.h"
+ #include "ui/views/widget/widget.h"
+ 
+@@ -316,6 +317,9 @@ ui::ColorId TabStripFlatEdgeButton::GetB
+ }
+ 
+ gfx::RoundedCornersF TabStripFlatEdgeButton::GetButtonCornerRadii() const {
++  if (views::LayoutProvider::UseSquareCorners()) {
++    return gfx::RoundedCornersF();
++  }
+   constexpr float kFlatRadius = 2.0f;
+   const float rounded_radius = corner_radius_.value_or(8.0f);
+   float flat_radius = kFlatRadius + ((rounded_radius - kFlatRadius) *
+--- a/chrome/browser/ui/views/tabs/tab_group_style_views.cc
++++ b/chrome/browser/ui/views/tabs/tab_group_style_views.cc
+@@ -18,6 +18,7 @@
+ #include "ui/gfx/geometry/rect.h"
+ #include "ui/gfx/geometry/skia_conversions.h"
+ #include "ui/views/background.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/view.h"
+ #include "ui/views/view_utils.h"
+ 
+@@ -71,9 +72,10 @@ bool TabGroupStyleViews::TabGroupUnderli
+ // The path is a rounded rect.
+ SkPath TabGroupStyleViews::GetUnderlinePath(
+     const gfx::Rect local_bounds) const {
+-  return SkPath::RRect(SkRRect::MakeRectXY(
+-      gfx::RectToSkRect(local_bounds), TabGroupUnderline::kStrokeThickness / 2,
+-      TabGroupUnderline::kStrokeThickness / 2));
++  const float radius =
++      views::LayoutProvider::UseSquareCorners() ? 0 : TabGroupUnderline::kStrokeThickness / 2;
++  return SkPath::RRect(
++      SkRRect::MakeRectXY(gfx::RectToSkRect(local_bounds), radius, radius));
+ }
+ 
+ gfx::Rect TabGroupStyleViews::GetEmptyTitleChipBounds(
+--- a/chrome/browser/ui/views/tabs/tab_strip_control_button.cc
++++ b/chrome/browser/ui/views/tabs/tab_strip_control_button.cc
+@@ -25,6 +25,7 @@
+ #include "ui/views/animation/ink_drop_state.h"
+ #include "ui/views/background.h"
+ #include "ui/views/controls/highlight_path_generator.h"
++#include "ui/views/layout/layout_provider.h"
+ 
+ using std::make_unique;
+ 
+@@ -193,7 +194,7 @@ void TabStripControlButton::UpdateIcon()
+ }
+ 
+ int TabStripControlButton::GetCornerRadius() const {
+-  return 8;
++  return views::LayoutProvider::UseSquareCorners() ? 0 : 8;
+ }
+ 
+ int TabStripControlButton::GetFlatCornerRadius() const {
+--- a/chrome/browser/ui/views/tabs/tab_strip_nudge_button.cc
++++ b/chrome/browser/ui/views/tabs/tab_strip_nudge_button.cc
+@@ -18,6 +18,7 @@
+ #include "ui/views/animation/ink_drop.h"
+ #include "ui/views/controls/highlight_path_generator.h"
+ #include "ui/views/layout/box_layout.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/view_class_properties.h"
+ 
+ namespace {
+@@ -132,11 +133,11 @@ gfx::SlideAnimation* TabStripNudgeButton
+ }
+ 
+ int TabStripNudgeButton::GetCornerRadius() const {
+-  return kTabStripNudgeCornerRadius;
++  return views::LayoutProvider::UseSquareCorners() ? 0 : kTabStripNudgeCornerRadius;
+ }
+ 
+ int TabStripNudgeButton::GetFlatCornerRadius() const {
+-  return kTabStripNudgeFlatCornerRadius;
++  return views::LayoutProvider::UseSquareCorners() ? 0 : kTabStripNudgeFlatCornerRadius;
+ }
+ 
+ void TabStripNudgeButton::SetCloseButtonFocusBehavior(
+--- a/chrome/browser/ui/views/toolbar/app_menu.cc
++++ b/chrome/browser/ui/views/toolbar/app_menu.cc
+@@ -310,7 +310,8 @@ class InMenuButtonBackground : public vi
+         color_provider->GetColor(state == views::Button::STATE_NORMAL
+                                      ? ui::kColorMenuButtonBackground
+                                      : ui::kColorMenuButtonBackgroundSelected));
+-    canvas->DrawRoundRect(gfx::RectF(bounds_rect), menu_item.corner_radius,
++    canvas->DrawRoundRect(gfx::RectF(bounds_rect),
++                          views::LayoutProvider::UseSquareCorners() ? 0 : menu_item.corner_radius,
+                           flags);
+     return;
+   }
+--- a/chrome/browser/ui/views/toolbar/pinned_toolbar_button_status_indicator.cc
++++ b/chrome/browser/ui/views/toolbar/pinned_toolbar_button_status_indicator.cc
+@@ -15,6 +15,7 @@
+ #include "ui/gfx/canvas.h"
+ #include "ui/gfx/geometry/insets.h"
+ #include "ui/views/cascading_property.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/style/platform_style.h"
+ #include "ui/views/view_utils.h"
+ #include "ui/views/widget/widget.h"
+@@ -66,8 +67,9 @@ PinnedToolbarButtonStatusIndicator::Pinn
+ 
+ void PinnedToolbarButtonStatusIndicator::OnPaint(gfx::Canvas* canvas) {
+   canvas->SaveLayerAlpha(SK_AlphaOPAQUE);
+-  const SkPath path = SkPath::RRect(SkRRect::MakeRectXY(
+-      gfx::RectToSkRect(GetLocalBounds()), height() / 2, height() / 2));
++  const float radius = views::LayoutProvider::UseSquareCorners() ? 0 : height() / 2;
++  const SkPath path = SkPath::RRect(
++      SkRRect::MakeRectXY(gfx::RectToSkRect(GetLocalBounds()), radius, radius));
+ 
+   cc::PaintFlags flags;
+ 
+--- a/chrome/browser/ui/views/webauthn/pin_textfield.cc
++++ b/chrome/browser/ui/views/webauthn/pin_textfield.cc
+@@ -29,6 +29,7 @@
+ #include "ui/gfx/text_constants.h"
+ #include "ui/views/accessibility/view_accessibility.h"
+ #include "ui/views/border.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/style/typography.h"
+ #include "ui/views/style/typography_provider.h"
+ #include "ui/views/view.h"
+@@ -176,8 +177,9 @@ void PinTextfield::OnPaint(gfx::Canvas*
+                         kCellWidth, kCellHeight);
+ 
+     // Make sure background is not drawn outside of the rounded cell.
++    const float cell_radius = views::LayoutProvider::UseSquareCorners() ? 0 : kCellRadius;
+     const SkPath path = SkPath::RRect(SkRRect::MakeRectXY(
+-        gfx::RectToSkRect(cell_rect), kCellRadius, kCellRadius));
++        gfx::RectToSkRect(cell_rect), cell_radius, cell_radius));
+     canvas->Save();
+     canvas->ClipPath(path, /*do_anti_alias=*/true);
+ 
+@@ -186,7 +188,7 @@ void PinTextfield::OnPaint(gfx::Canvas*
+     // Draw cell border.
+     gfx::RectF cell_rect_f(cell_rect);
+     cell_rect_f.Inset(stroke_width / 2.f);
+-    canvas->DrawRoundRect(cell_rect_f, kCellRadius, paint_flags);
++    canvas->DrawRoundRect(cell_rect_f, cell_radius, paint_flags);
+     // Draw cell text.
+     render_texts_[i]->SetDisplayRect(cell_rect);
+     render_texts_[i]->Draw(canvas);
+--- a/ui/compositor/layer.cc
++++ b/ui/compositor/layer.cc
+@@ -57,6 +57,8 @@
+ namespace ui {
+ namespace {
+ 
++bool g_square_corners = false;
++
+ const Layer* GetRoot(const Layer* layer) {
+   // Parent walk cannot be done on a layer that is being used as a mask. Get the
+   // layer to which this layer is a mask of.
+@@ -1466,10 +1468,16 @@ void Layer::SetClipRectFromAnimation(con
+     delegate_->OnLayerClipRectChanged(old_rect, reason);
+ }
+ 
++// static
++void Layer::SetSquareCorners(bool square_corners) {
++  g_square_corners = square_corners;
++}
++
+ void Layer::SetRoundedCornersFromAnimation(
+     const gfx::RoundedCornersF& rounded_corners,
+     PropertyChangeReason reason) {
+-  cc_layer_->SetRoundedCorner(rounded_corners);
++  cc_layer_->SetRoundedCorner(g_square_corners ? gfx::RoundedCornersF()
++                                               : rounded_corners);
+ 
+   for (const auto& mirror : mirrors_) {
+     Layer* mirror_dest = mirror->dest();
+--- a/ui/compositor/layer.h
++++ b/ui/compositor/layer.h
+@@ -405,6 +405,9 @@ class COMPOSITOR_EXPORT Layer : public L
+   void SetAcceptEvents(bool accept_events);
+   bool accept_events() const { return accept_events_; }
+ 
++  // Makes every layer drop its rounded corner clip, for square corners.
++  static void SetSquareCorners(bool square_corners);
++
+   // Gets/sets a rounded corner clip on the layer.
+   gfx::RoundedCornersF GetTargetRoundedCornerRadius() const;
+   void SetRoundedCornerRadius(const gfx::RoundedCornersF& corner_radii);
+--- a/ui/views/animation/ink_drop_painted_layer_delegates.cc
++++ b/ui/views/animation/ink_drop_painted_layer_delegates.cc
+@@ -21,6 +21,7 @@
+ #include "ui/gfx/geometry/size_conversions.h"
+ #include "ui/gfx/geometry/skia_conversions.h"
+ #include "ui/gfx/skia_paint_util.h"
++#include "ui/views/layout/layout_provider.h"
+ 
+ namespace views {
+ 
+@@ -67,6 +68,10 @@ void CircleLayerDelegate::OnPaintLayer(c
+                              gfx::ToEnclosingRect(GetPaintedBounds()).size());
+   gfx::Canvas* canvas = recorder.canvas();
+ 
++  if (LayoutProvider::UseSquareCorners()) {
++    canvas->DrawRect(GetPaintedBounds(), flags);
++    return;
++  }
+   canvas->DrawCircle(GetPaintedBounds().CenterPoint(), radius_, flags);
+ }
+ 
+@@ -106,7 +111,7 @@ RoundedRectangleLayerDelegate::RoundedRe
+     int corner_radius)
+     : BasePaintedLayerDelegate(color),
+       size_(size),
+-      corner_radius_(corner_radius) {}
++      corner_radius_(LayoutProvider::UseSquareCorners() ? 0 : corner_radius) {}
+ 
+ RoundedRectangleLayerDelegate::~RoundedRectangleLayerDelegate() = default;
+ 
+@@ -143,7 +148,7 @@ BorderShadowLayerDelegate::BorderShadowL
+       shadows_(shadows),
+       bounds_(shadowed_area_bounds),
+       fill_color_(fill_color),
+-      corner_radius_(corner_radius) {}
++      corner_radius_(LayoutProvider::UseSquareCorners() ? 0 : corner_radius) {}
+ 
+ BorderShadowLayerDelegate::~BorderShadowLayerDelegate() = default;
+ 
+--- a/ui/views/background.cc
++++ b/ui/views/background.cc
+@@ -28,6 +28,7 @@
+ #include "ui/gfx/geometry/rounded_corners_f.h"
+ #include "ui/gfx/geometry/skia_conversions.h"
+ #include "ui/gfx/image/image_skia.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/painter.h"
+ #include "ui/views/view.h"
+ 
+@@ -67,7 +68,10 @@ class RoundedRectBackground : public Bac
+   RoundedRectBackground(ui::ColorVariant color,
+                         const std::optional<gfx::RoundedCornersF>& radii,
+                         const gfx::Insets& insets)
+-      : radii_(radii), insets_(insets) {
++      : radii_(LayoutProvider::UseSquareCorners()
++                   ? std::make_optional(gfx::RoundedCornersF())
++                   : radii),
++        insets_(insets) {
+     SetColor(color);
+   }
+ 
+@@ -115,7 +119,9 @@ class LayerBasedSolidBackground : public
+  public:
+   LayerBasedSolidBackground(ui::ColorVariant color,
+                             const std::optional<gfx::RoundedCornersF>& radii)
+-      : radii_(radii) {
++      : radii_(LayoutProvider::UseSquareCorners() && radii
++                   ? std::make_optional(gfx::RoundedCornersF())
++                   : radii) {
+     SetColor(color);
+   }
+ 
+--- a/ui/views/bubble/bubble_border.cc
++++ b/ui/views/bubble/bubble_border.cc
+@@ -34,6 +34,7 @@
+ #include "ui/gfx/shadow_value.h"
+ #include "ui/gfx/skia_paint_util.h"
+ #include "ui/views/bubble/bubble_border_arrow_utils.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/metadata/type_conversion.h"
+ #include "ui/views/view.h"
+ #include "ui/views/widget/widget.h"
+@@ -281,6 +282,11 @@ BubbleBorder::BubbleBorder(Arrow arrow,
+ 
+ BubbleBorder::~BubbleBorder() = default;
+ 
++void BubbleBorder::set_rounded_corners(const gfx::RoundedCornersF& radii) {
++  rounded_corners_ =
++      LayoutProvider::UseSquareCorners() ? gfx::RoundedCornersF() : radii;
++}
++
+ // static
+ gfx::Insets BubbleBorder::GetBorderAndShadowInsets(
+     const std::optional<int>& elevation,
+--- a/ui/views/bubble/bubble_border.h
++++ b/ui/views/bubble/bubble_border.h
+@@ -164,9 +164,7 @@ class VIEWS_EXPORT BubbleBorder : public
+                                   gfx::Canvas* canvas,
+                                   const ui::ColorProvider* color_provider);
+ 
+-  void set_rounded_corners(const gfx::RoundedCornersF& radii) {
+-    rounded_corners_ = radii;
+-  }
++  void set_rounded_corners(const gfx::RoundedCornersF& radii);
+   const gfx::RoundedCornersF& rounded_corners() const {
+     return rounded_corners_;
+   }
+--- a/ui/views/controls/button/md_text_button.cc
++++ b/ui/views/controls/button/md_text_button.cc
+@@ -181,6 +181,9 @@ void MdTextButton::SetCornerRadius(float
+ }
+ 
+ gfx::RoundedCornersF MdTextButton::GetCornerRadii() const {
++  if (LayoutProvider::UseSquareCorners()) {
++    return gfx::RoundedCornersF();
++  }
+   if (radii_.has_value()) {
+     return radii_.value();
+   }
+--- a/ui/views/controls/focusable_border.cc
++++ b/ui/views/controls/focusable_border.cc
+@@ -17,6 +17,7 @@
+ #include "ui/gfx/scoped_canvas.h"
+ #include "ui/views/controls/focus_ring.h"
+ #include "ui/views/controls/textfield/textfield.h"
++#include "ui/views/layout/layout_provider.h"
+ 
+ namespace {
+ 
+@@ -49,7 +50,8 @@ void FocusableBorder::Paint(const View&
+   rect.Inset(gfx::InsetsF(kStrokeWidth / 2.0f));
+ 
+   flags.setAntiAlias(true);
+-  float corner_radius_px = corner_radius_ * dsf;
++  float corner_radius_px =
++      LayoutProvider::UseSquareCorners() ? 0 : corner_radius_ * dsf;
+   const SkPath path = SkPath::RRect(gfx::RectFToSkRect(rect), corner_radius_px,
+                                     corner_radius_px);
+ 
+--- a/ui/views/controls/highlight_path_generator.cc
++++ b/ui/views/controls/highlight_path_generator.cc
+@@ -11,6 +11,7 @@
+ #include "ui/gfx/geometry/rounded_corners_f.h"
+ #include "ui/gfx/geometry/rrect_f.h"
+ #include "ui/gfx/geometry/skia_conversions.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/view.h"
+ #include "ui/views/view_class_properties.h"
+ 
+@@ -59,7 +60,11 @@ std::optional<gfx::RRectF> HighlightPath
+   if (use_mirrored_rect_) {
+     bounds = view->GetMirroredRect(bounds);
+   }
+-  return GetRoundRect(gfx::RectF(bounds));
++  std::optional<gfx::RRectF> round_rect = GetRoundRect(gfx::RectF(bounds));
++  if (round_rect && LayoutProvider::UseSquareCorners()) {
++    return gfx::RRectF(round_rect->rect());
++  }
++  return round_rect;
+ }
+ 
+ std::optional<gfx::RRectF> EmptyHighlightPathGenerator::GetRoundRect(
+--- a/ui/views/painter.cc
++++ b/ui/views/painter.cc
+@@ -21,6 +21,7 @@
+ #include "ui/gfx/geometry/size.h"
+ #include "ui/gfx/nine_image_painter.h"
+ #include "ui/gfx/scoped_canvas.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/view.h"
+ 
+ namespace views {
+@@ -69,7 +70,8 @@ SolidRoundRectPainter::SolidRoundRectPai
+                                              bool should_border_scale)
+     : bg_color_(bg_color),
+       stroke_color_(stroke_color),
+-      radii_(radii),
++      radii_(LayoutProvider::UseSquareCorners() ? gfx::RoundedCornersF()
++                                                : radii),
+       insets_(insets),
+       blend_mode_(blend_mode),
+       antialias_(antialias),
+--- a/ui/views/view_shadow.cc
++++ b/ui/views/view_shadow.cc
+@@ -7,6 +7,7 @@
+ #include "ui/compositor/layer.h"
+ #include "ui/decoration/shadow.h"
+ #include "ui/gfx/geometry/rounded_corners_f.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/view.h"
+ #include "ui/views/view_class_properties.h"
+ 
+@@ -30,11 +31,12 @@ ViewShadow::~ViewShadow() {
+ }
+ 
+ void ViewShadow::SetRoundedCornerRadius(int corner_radius) {
+-  shadow_->SetRoundedCorners(gfx::RoundedCornersF(corner_radius));
++  SetRoundedCorners(gfx::RoundedCornersF(corner_radius));
+ }
+ 
+ void ViewShadow::SetRoundedCorners(const gfx::RoundedCornersF& radii) {
+-  shadow_->SetRoundedCorners(radii);
++  shadow_->SetRoundedCorners(
++      LayoutProvider::UseSquareCorners() ? gfx::RoundedCornersF() : radii);
+ }
+ 
+ void ViewShadow::OnViewLayerBoundsSet(View* view) {
+--- a/ui/views/window/dialog_delegate.cc
++++ b/ui/views/window/dialog_delegate.cc
+@@ -630,7 +630,7 @@ int DialogDelegate::GetCornerRadius() co
+     return 2;
+   }
+ #endif
+-  if (params_.corner_radius) {
++  if (params_.corner_radius && !LayoutProvider::UseSquareCorners()) {
+     return *params_.corner_radius;
+   }
+   return LayoutProvider::Get()->GetCornerRadiusMetric(
