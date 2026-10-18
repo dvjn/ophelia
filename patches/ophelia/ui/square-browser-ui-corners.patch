@@ -1,0 +1,594 @@
+--- a/chrome/app/settings_strings.grdp
++++ b/chrome/app/settings_strings.grdp
+@@ -280,6 +280,12 @@
+     <message name="IDS_SETTINGS_ROUNDED_FRAME" desc="Label for the toggle which enables or disables a rounded frame around web contents.">
+       Show a rounded frame around web contents
+     </message>
++    <message name="IDS_SETTINGS_SQUARE_UI_CORNERS" desc="Label for the toggle which removes rounded corners from the browser UI.">
++      Use square corners in the browser
++    </message>
++    <message name="IDS_SETTINGS_SQUARE_UI_CORNERS_DESCRIPTION" desc="Description for the toggle which removes rounded corners from the browser UI.">
++      Removes rounded corners from tabs, menus, dialogs and browser pages. Applies after a relaunch.
++    </message>
+     <message name="IDS_SETTINGS_NATIVE_FRAME_MATERIALS" desc="Label for the toggle which enables or disables native system materials on the browser frame.">
+       Use native frame materials (experimental)
+     </message>
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -614,6 +614,7 @@
+ #include "components/webapps/isolated_web_apps/url_loading/url_loader_factory.h"
+ #include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom.h"
+ #include "third_party/blink/public/mojom/installedapp/related_application.mojom.h"
++#include "ui/views/layout/layout_provider.h"
+ #endif  // !BUILDFLAG(IS_ANDROID)
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
+@@ -2967,6 +2968,13 @@ void ChromeContentBrowserClient::AppendE
+ #endif
+ 
+   if (process_type == switches::kRendererProcess) {
++#if !BUILDFLAG(IS_ANDROID)
++    // Internal pages follow the browser UI, which reads the pref at startup.
++    if (views::LayoutProvider::UseSquareCorners()) {
++      command_line->AppendSwitch(switches::kSquareUiCorners);
++    }
++#endif
++
+     content::RenderProcessHost* process =
+         content::RenderProcessHost::FromID(child_process_id);
+     if (process) {
+--- a/chrome/browser/extensions/api/settings_private/prefs_util.cc
++++ b/chrome/browser/extensions/api/settings_private/prefs_util.cc
+@@ -331,6 +331,8 @@ const PrefsUtil::TypedPrefMap& PrefsUtil
+       settings_api::PrefType::kBoolean;
+   (*s_allowlist)[::prefs::kHeliumRoundedFrame] =
+       settings_api::PrefType::kBoolean;
++  (*s_allowlist)[::prefs::kHeliumSquareUiCorners] =
++      settings_api::PrefType::kBoolean;
+ 
+   (*s_allowlist)[::prefs::kShowHomeButton] = settings_api::PrefType::kBoolean;
+   (*s_allowlist)[contextual_search::kDriveConsentState] =
+--- a/chrome/browser/resources/settings/appearance_page/appearance_page.html.ts
++++ b/chrome/browser/resources/settings/appearance_page/appearance_page.html.ts
+@@ -118,6 +118,17 @@ export function getHtml(this: SettingsAp
+         label="$i18n{roundedFrame}">
+     </settings-toggle-button>
+     <settings-toggle-button class="hr"
++        pref-key="helium.browser.square_ui_corners"
++        label="$i18n{squareUiCorners}"
++        sub-label="$i18n{squareUiCornersDescription}">
++      ${this.shouldShowSquareUiCornersRestart_() ? html`
++        <cr-button @click="${this.onSquareUiCornersRestartClick_}"
++            slot="more-actions">
++          $i18n{restart}
++        </cr-button>
++      ` : ''}
++    </settings-toggle-button>
++    <settings-toggle-button class="hr"
+         ?hidden="${!this.showNativeFrameMaterialsOption_}"
+         pref-key="helium.browser.native_frame_materials"
+         label="$i18n{nativeFrameMaterials}"
+--- a/chrome/browser/resources/settings/appearance_page/appearance_page.ts
++++ b/chrome/browser/resources/settings/appearance_page/appearance_page.ts
+@@ -29,7 +29,7 @@ import type {MetricsBrowserProxy} from '
+ import {MetricsBrowserProxyImpl} from '../metrics_browser_proxy.js';
+ import {pageVisibility} from '../page_visibility.js';
+ import type {AppearancePageVisibility} from '../page_visibility.js';
+-import {RelaunchMixinLit} from '../relaunch_mixin_lit.js';
++import {RelaunchMixinLit, RestartType} from '../relaunch_mixin_lit.js';
+ import {routes} from '../route.js';
+ import {Router} from '../router.js';
+ import {SettingsViewMixinLit} from '../settings_page/settings_view_mixin_lit.js';
+@@ -154,6 +154,8 @@ export class SettingsAppearancePageEleme
+       themeIdPref_: {type: Object},
+       themePolicyColorPref_: {type: Object},
+       zenModePref_: {type: Object},
++      squareUiCornersPref_: {type: Object},
++      squareUiCornersAtStartup_: {type: Boolean},
+ 
+       // <if expr="is_linux">
+       themeSystemThemePref_: {type: Object},
+@@ -224,6 +226,9 @@ export class SettingsAppearancePageEleme
+   protected accessor themePolicyColorPref_: PrefObject<number>|undefined =
+       undefined;
+   protected accessor zenModePref_: PrefObject<boolean>|undefined = undefined;
++  protected accessor squareUiCornersPref_: PrefObject<boolean>|undefined =
++      undefined;
++  protected accessor squareUiCornersAtStartup_: boolean|undefined = undefined;
+ 
+   // <if expr="is_linux">
+   protected accessor themeSystemThemePref_: PrefObject<number>|undefined =
+@@ -371,9 +376,18 @@ export class SettingsAppearancePageEleme
+       'side_panel.is_right_aligned': 'sidePanelIsRightAlignedPref_',
+       'toolbar.pinned_actions': 'pinnedActionsPref_',
+       'helium.browser.zen_mode': 'zenModePref_',
++      'helium.browser.square_ui_corners': 'squareUiCornersPref_',
+       'webkit.webprefs.default_font_size': 'defaultFontSizePref_',
+     });
+ 
++    // The browser UI reads the pref at startup only.
++    PrefService.getInstance().whenInitialized().then(() => {
++      this.squareUiCornersAtStartup_ =
++          PrefService.getInstance()
++              .getPref<boolean>('helium.browser.square_ui_corners')
++              .value;
++    });
++
+     // TODO(dschuyler): Look into adding a listener for the
+     // default zoom percent.
+     this.appearanceBrowserProxy_.getDefaultZoom().then(zoom => {
+@@ -639,6 +653,18 @@ export class SettingsAppearancePageEleme
+     return previousIsVisible && nextIsVisible;
+   }
+ 
++  protected shouldShowSquareUiCornersRestart_(): boolean {
++    return this.squareUiCornersAtStartup_ !== undefined &&
++        !!this.squareUiCornersPref_ &&
++        this.squareUiCornersPref_.value !== this.squareUiCornersAtStartup_;
++  }
++
++  protected onSquareUiCornersRestartClick_(e: Event) {
++    // Prevent event from bubbling up to the toggle button.
++    e.stopPropagation();
++    this.performRestart(RestartType.RESTART);
++  }
++
+   protected onTabStripPositionSettingsControlChange_(event: Event) {
+     const dropdown = event.target as SettingsDropdownMenuElement;
+     const enabled = dropdown.getSelectedValue() === 'true';
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -3917,6 +3917,10 @@ source_set("layout_constants") {
+     deps += [ "//chrome/browser/ui/tabs:features" ]
+   }
+ 
++  if (toolkit_views) {
++    deps += [ "//ui/views" ]
++  }
++
+   if (is_chromeos) {
+     deps += [
+       ":platform_keys_certificate_selector_chromeos",
+--- a/chrome/browser/ui/browser_ui_prefs.cc
++++ b/chrome/browser/ui/browser_ui_prefs.cc
+@@ -35,6 +35,7 @@
+ 
+ void RegisterBrowserPrefs(PrefRegistrySimple* registry) {
+   registry->RegisterBooleanPref(prefs::kAllowFileSelectionDialogs, true);
++  registry->RegisterBooleanPref(prefs::kHeliumSquareUiCorners, false);
+ 
+ #if !BUILDFLAG(IS_ANDROID)
+   registry->RegisterIntegerPref(prefs::kRelaunchNotification, 0);
+--- a/chrome/browser/ui/layout_constants.cc
++++ b/chrome/browser/ui/layout_constants.cc
+@@ -13,12 +13,30 @@
+ #include "ui/base/ui_base_features.h"
+ #include "ui/gfx/geometry/insets.h"
+ 
++#if defined(TOOLKIT_VIEWS)
++#include "ui/views/layout/layout_provider.h"
++#endif
++
+ #if BUILDFLAG(IS_CHROMEOS)
+ #include "chromeos/constants/chromeos_features.h"
+ #endif
+ 
+ int GetLayoutConstant(LayoutConstant constant) {
+   const bool touch_ui = ui::TouchUiController::Get()->touch_ui();
++#if defined(TOOLKIT_VIEWS)
++  if (views::LayoutProvider::UseSquareCorners()) {
++    switch (constant) {
++      case LayoutConstant::kLocationBarChildCornerRadius:
++      case LayoutConstant::kMainBackgroundRegionCornerRadius:
++      case LayoutConstant::kToolbarDividerCornerRadius:
++      case LayoutConstant::kToolbarCornerRadius:
++      case LayoutConstant::kVerticalTabCornerRadius:
++        return 0;
++      default:
++        break;
++    }
++  }
++#endif
+   switch (constant) {
+     case LayoutConstant::kHeliumBasePadding:
+       return 3;
+--- a/chrome/browser/ui/views/chrome_browser_main_extra_parts_views.cc
++++ b/chrome/browser/ui/views/chrome_browser_main_extra_parts_views.cc
+@@ -24,10 +24,12 @@
+ #include "chrome/browser/ui/views/media_router/media_router_dialog_controller_views.h"
+ #include "chrome/browser/ui/views/relaunch_notification/relaunch_notification_controller.h"
+ #include "chrome/common/chrome_paths.h"
++#include "chrome/common/pref_names.h"
+ #include "chrome/grit/generated_resources.h"
+ #include "components/constrained_window/constrained_window_views.h"
+ #include "components/infobars/core/infobar_delegate.h"
+ #include "components/media_router/browser/media_router_dialog_controller.h"
++#include "components/prefs/pref_service.h"
+ #include "components/strings/grit/components_strings.h"
+ #include "components/ui_devtools/devtools_server.h"
+ #include "components/ui_devtools/switches.h"
+@@ -116,6 +118,11 @@ void ChromeBrowserMainExtraPartsViews::P
+ }
+ 
+ void ChromeBrowserMainExtraPartsViews::PreProfileInit() {
++  // Local state is loaded by now, and no browser UI is built yet.
++  views::LayoutProvider::SetSquareCorners(
++      g_browser_process->local_state()->GetBoolean(
++          prefs::kHeliumSquareUiCorners));
++
+   infobars::RegisterPreProfileInitInfoBars();
+   if (ui_devtools::UiDevToolsServer::IsUiDevToolsEnabled(
+           ui_devtools::switches::kEnableUiDevTools)) {
+--- a/chrome/browser/ui/views/helium/frame_corner_radius.cc
++++ b/chrome/browser/ui/views/helium/frame_corner_radius.cc
+@@ -6,18 +6,28 @@
+ 
+ #include "build/build_config.h"
+ #include "chrome/browser/ui/layout_constants.h"
++#include "ui/views/layout/layout_provider.h"
+ 
+ int GetGenericFrameRadius() {
++  if (views::LayoutProvider::UseSquareCorners()) {
++    return 0;
++  }
+   return 8;
+ }
+ 
+ #if !BUILDFLAG(IS_MAC)
+ int GetSystemWindowRadius() {
++  if (views::LayoutProvider::UseSquareCorners()) {
++    return 0;
++  }
+   return 8;
+ }
+ #endif
+ 
+ int GetPaddedFrameRadius() {
++  if (views::LayoutProvider::UseSquareCorners()) {
++    return 0;
++  }
+   return GetSystemWindowRadius() -
+          GetLayoutConstant(LayoutConstant::kHeliumBasePadding);
+ }
+--- a/chrome/browser/ui/views/tabs/common/horizontal_tab_style_views.cc
++++ b/chrome/browser/ui/views/tabs/common/horizontal_tab_style_views.cc
+@@ -40,6 +40,7 @@
+ #include "ui/gfx/geometry/insets.h"
+ #include "ui/gfx/geometry/skia_conversions.h"
+ #include "ui/gfx/scoped_canvas.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/widget/widget.h"
+ 
+ namespace {
+@@ -892,6 +893,10 @@ BrowserFrameView* HorizontalTabStyleView
+ }
+ 
+ float HorizontalTabStyleViews::GetTopCornerRadiusForWidth(int width) const {
++  if (views::LayoutProvider::UseSquareCorners()) {
++    return 0;
++  }
++
+   // Get the width of the top of the tab by subtracting the width of the outer
+   // corners.
+   const int ideal_radius = tab_style()->GetTopCornerRadius();
+--- a/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
++++ b/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
+@@ -600,6 +600,9 @@ void AddAppearanceStrings(content::WebUI
+       {"openNewTabNextToActive", IDS_SETTINGS_NEW_TAB_NEXT_TO_ACTIVE_BUTTON},
+       {"cycleTabsInMRUOrder", IDS_SETTINGS_CYCLE_TABS_IN_MRU_ORDER},
+       {"roundedFrame", IDS_SETTINGS_ROUNDED_FRAME},
++      {"squareUiCorners", IDS_SETTINGS_SQUARE_UI_CORNERS},
++      {"squareUiCornersDescription",
++       IDS_SETTINGS_SQUARE_UI_CORNERS_DESCRIPTION},
+       {"nativeFrameMaterials", IDS_SETTINGS_NATIVE_FRAME_MATERIALS},
+       {"nativeFrameMaterialsDescription",
+        IDS_SETTINGS_NATIVE_FRAME_MATERIALS_DESCRIPTION},
+--- a/chrome/common/chrome_switches.h
++++ b/chrome/common/chrome_switches.h
+@@ -662,6 +662,10 @@ inline constexpr char kSameTab[] = "same
+ inline constexpr char kSilentDebuggerExtensionAPI[] =
+     "silent-debugger-extension-api";
+ 
++// Makes internal pages square, like the browser UI. Passed to renderers when
++// the square browser UI pref was set at startup.
++inline constexpr char kSquareUiCorners[] = "square-ui-corners";
++
+ // Causes Chrome to launch without opening any windows by default. Useful if
+ // one wishes to use Chrome as an ash server.
+ inline constexpr char kSilentLaunch[] = "silent-launch";
+--- a/chrome/common/pref_names.h
++++ b/chrome/common/pref_names.h
+@@ -622,6 +622,11 @@ inline constexpr char kShowZoomIndicator
+ // frame.
+ inline constexpr char kHeliumRoundedFrame[] = "helium.browser.rounded_frame";
+ 
++// A boolean local state pref set to true if the browser UI should have no
++// rounded corners. Read at startup, so it applies after a relaunch.
++inline constexpr char kHeliumSquareUiCorners[] =
++    "helium.browser.square_ui_corners";
++
+ // A boolean pref set to true if browser frame surfaces should use native system
+ // materials instead of opaque fills.
+ inline constexpr char kHeliumNativeFrameMaterials[] =
+--- a/chrome/renderer/BUILD.gn
++++ b/chrome/renderer/BUILD.gn
+@@ -99,6 +99,8 @@ static_library("renderer") {
+     "plugins/non_loadable_plugin_placeholder.h",
+     "plugins/pdf_plugin_placeholder.cc",
+     "plugins/pdf_plugin_placeholder.h",
++    "square_corners_observer.cc",
++    "square_corners_observer.h",
+     "supervised_user/supervised_user_error_page_controller.cc",
+     "supervised_user/supervised_user_error_page_controller.h",
+     "supervised_user/supervised_user_error_page_controller_delegate.h",
+--- a/chrome/renderer/chrome_content_renderer_client.cc
++++ b/chrome/renderer/chrome_content_renderer_client.cc
+@@ -67,6 +67,7 @@
+ #include "chrome/renderer/plugins/non_loadable_plugin_placeholder.h"
+ #include "chrome/renderer/plugins/pdf_plugin_placeholder.h"
+ #include "chrome/renderer/process_state.h"
++#include "chrome/renderer/square_corners_observer.h"
+ #include "chrome/renderer/supervised_user/supervised_user_error_page_controller_delegate_impl.h"
+ #include "chrome/renderer/tab_context_decryption_token_extension.h"
+ #include "chrome/renderer/trusted_vault_encryption_keys_extension.h"
+@@ -645,6 +646,7 @@ void ChromeContentRendererClient::Render
+   service_manager::BinderRegistry* registry = render_frame_observer->registry();
+ 
+   new prerender::NoStatePrefetchRenderFrameObserver(render_frame);
++  new SquareCornersObserver(render_frame);
+ 
+   auto content_settings_delegate =
+       std::make_unique<ChromeContentSettingsAgentDelegate>(render_frame);
+--- /dev/null
++++ b/chrome/renderer/square_corners_observer.cc
+@@ -0,0 +1,55 @@
++// Copyright 2026 The Ophelia Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#include "chrome/renderer/square_corners_observer.h"
++
++#include "base/command_line.h"
++#include "chrome/common/chrome_switches.h"
++#include "content/public/common/url_constants.h"
++#include "content/public/renderer/render_frame.h"
++#include "third_party/blink/public/platform/web_string.h"
++#include "third_party/blink/public/web/web_document.h"
++#include "third_party/blink/public/web/web_local_frame.h"
++#include "url/gurl.h"
++
++namespace {
++
++constexpr char kSquareCornersStyleSheet[] =
++    "*, ::before, ::after { border-radius: 0 !important; }";
++
++bool IsInternalPage(const GURL& url) {
++  return url.SchemeIs(content::kChromeUIScheme) ||
++         url.SchemeIs(content::kHeliumUIScheme) ||
++         url.SchemeIs(content::kChromeUIUntrustedScheme) ||
++         url.SchemeIs(content::kChromeDevToolsScheme);
++}
++
++}  // namespace
++
++SquareCornersObserver::SquareCornersObserver(content::RenderFrame* render_frame)
++    : content::RenderFrameObserver(render_frame) {}
++
++SquareCornersObserver::~SquareCornersObserver() = default;
++
++void SquareCornersObserver::DidCreateDocumentElement() {
++  if (!ShouldSquareCorners()) {
++    return;
++  }
++  render_frame()->GetWebFrame()->GetDocument().InsertStyleSheet(
++      blink::WebString::FromASCII(kSquareCornersStyleSheet), nullptr,
++      blink::WebCssOrigin::kUser);
++}
++
++void SquareCornersObserver::OnDestruct() {
++  delete this;
++}
++
++bool SquareCornersObserver::ShouldSquareCorners() const {
++  GURL url = render_frame()->GetWebFrame()->GetDocument().Url();
++  if (IsInternalPage(url)) {
++    return base::CommandLine::ForCurrentProcess()->HasSwitch(
++        switches::kSquareUiCorners);
++  }
++  return false;
++}
+--- /dev/null
++++ b/chrome/renderer/square_corners_observer.h
+@@ -0,0 +1,28 @@
++// Copyright 2026 The Ophelia Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#ifndef CHROME_RENDERER_SQUARE_CORNERS_OBSERVER_H_
++#define CHROME_RENDERER_SQUARE_CORNERS_OBSERVER_H_
++
++#include "content/public/renderer/render_frame_observer.h"
++
++// Removes rounded corners from a frame's documents with a user stylesheet,
++// which beats the page's own !important rules and also applies inside shadow
++// trees. Internal pages follow the square browser UI pref.
++class SquareCornersObserver : public content::RenderFrameObserver {
++ public:
++  explicit SquareCornersObserver(content::RenderFrame* render_frame);
++  SquareCornersObserver(const SquareCornersObserver&) = delete;
++  SquareCornersObserver& operator=(const SquareCornersObserver&) = delete;
++  ~SquareCornersObserver() override;
++
++  // content::RenderFrameObserver:
++  void DidCreateDocumentElement() override;
++  void OnDestruct() override;
++
++ private:
++  bool ShouldSquareCorners() const;
++};
++
++#endif  // CHROME_RENDERER_SQUARE_CORNERS_OBSERVER_H_
+--- a/ui/views/layout/layout_provider.cc
++++ b/ui/views/layout/layout_provider.cc
+@@ -19,6 +19,7 @@ namespace views {
+ namespace {
+ 
+ LayoutProvider* g_layout_delegate = nullptr;
++bool g_square_corners = false;
+ 
+ }  // namespace
+ 
+@@ -38,6 +39,16 @@ LayoutProvider* LayoutProvider::Get() {
+ }
+ 
+ // static
++void LayoutProvider::SetSquareCorners(bool square_corners) {
++  g_square_corners = square_corners;
++}
++
++// static
++bool LayoutProvider::UseSquareCorners() {
++  return g_square_corners;
++}
++
++// static
+ int LayoutProvider::GetControlHeightForFont(int context,
+                                             int style,
+                                             const gfx::FontList& font) {
+@@ -190,6 +201,9 @@ gfx::Insets LayoutProvider::GetDialogIns
+ 
+ int LayoutProvider::GetCornerRadiusMetric(Emphasis emphasis,
+                                           const gfx::Size& size) const {
++  if (g_square_corners) {
++    return 0;
++  }
+   switch (emphasis) {
+     case Emphasis::kNone:
+       return 0;
+@@ -226,6 +240,9 @@ ShapeSysTokens GetShapeSysToken(ShapeCon
+ 
+ int LayoutProvider::GetCornerRadiusMetric(ShapeContextTokens id,
+                                           const gfx::Size& size) const {
++  if (g_square_corners) {
++    return 0;
++  }
+   ShapeSysTokens token = GetShapeSysToken(id);
+   DCHECK_NE(token, ShapeSysTokens::kDefault)
+       << "kDefault token means there is a missing mapping between shape tokens";
+--- a/ui/views/layout/layout_provider.h
++++ b/ui/views/layout/layout_provider.h
+@@ -211,6 +211,11 @@ class VIEWS_EXPORT LayoutProvider {
+   // View::GetLayoutProvider().
+   static LayoutProvider* Get();
+ 
++  // Makes every corner radius metric 0, for square browser UI. Set it before
++  // any UI is created, since views read their radii when they are built.
++  static void SetSquareCorners(bool square_corners);
++  static bool UseSquareCorners();
++
+   // Calculates the control height based on the |font|'s reported glyph height,
+   // the default line spacing and DISTANCE_CONTROL_VERTICAL_TEXT_PADDING.
+   static int GetControlHeightForFont(int context,
+--- a/chrome/browser/ui/views/omnibox/omnibox_match_cell_view.cc
++++ b/chrome/browser/ui/views/omnibox/omnibox_match_cell_view.cc
+@@ -271,7 +271,9 @@ void OmniboxMatchCellView::OnMatchUpdate
+     answer_image_view_->SetImage(ui::ImageModel::FromImageSkia(
+         gfx::ImageSkiaOperations::CreateImageWithRoundRectBackground(
+             gfx::SizeF(kUniformRowHeightIconSize, kUniformRowHeightIconSize),
+-            kIconAndImageCornerRadius,
++            views::LayoutProvider::UseSquareCorners()
++                ? 0
++                : kIconAndImageCornerRadius,
+             color_provider->GetColor(kColorOmniboxAnswerIconGM3Background),
+             icon)));
+   };
+@@ -357,7 +359,9 @@ void OmniboxMatchCellView::SetImage(cons
+     answer_image_view_->SetImage(ui::ImageModel::FromImageSkia(
+         gfx::ImageSkiaOperations::CreateImageWithRoundRectBackground(
+             gfx::SizeF(kThumbnailBackgroundSize, kThumbnailBackgroundSize),
+-            kIconAndImageCornerRadius,
++            views::LayoutProvider::UseSquareCorners()
++                ? 0
++                : kIconAndImageCornerRadius,
+             GetColorProvider()->GetColor(kColorOmniboxResultsBackground),
+             resized_image)));
+   } else {
+--- a/chrome/browser/ui/views/tabs/common/tab_group_line_view.cc
++++ b/chrome/browser/ui/views/tabs/common/tab_group_line_view.cc
+@@ -28,6 +28,7 @@
+ #include "ui/gfx/geometry/point.h"
+ #include "ui/gfx/geometry/rect.h"
+ #include "ui/gfx/scoped_canvas.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/view.h"
+ #include "ui/views/view_utils.h"
+ #include "ui/views/widget/widget.h"
+@@ -70,11 +71,12 @@ void TabGroupLineView::PaintVertical(gfx
+   flags.setStyle(cc::PaintFlags::kFill_Style);
+ 
+   SkRRect rrect;
+-  SkVector radii[4] = {
+-      SkVector(kGroupLineCornerRadius, kGroupLineCornerRadius),
+-      SkVector(kGroupLineCornerRadius, kGroupLineCornerRadius),
+-      SkVector(kGroupLineCornerRadius, kGroupLineCornerRadius),
+-      SkVector(kGroupLineCornerRadius, kGroupLineCornerRadius)};
++  const int corner_radius =
++      views::LayoutProvider::UseSquareCorners() ? 0 : kGroupLineCornerRadius;
++  SkVector radii[4] = {SkVector(corner_radius, corner_radius),
++                       SkVector(corner_radius, corner_radius),
++                       SkVector(corner_radius, corner_radius),
++                       SkVector(corner_radius, corner_radius)};
+   gfx::Rect local_bounds = GetLocalBounds();
+   rrect.setRectRadii(
+       SkRect::MakeXYWH(local_bounds.x(), local_bounds.y(), local_bounds.width(),
+--- a/chrome/browser/ui/views/tabs/common/tab_group_style.cc
++++ b/chrome/browser/ui/views/tabs/common/tab_group_style.cc
+@@ -11,6 +11,7 @@
+ #include "chrome/browser/ui/views/tabs/shared/tab_strip_types.h"
+ #include "ui/gfx/geometry/insets.h"
+ #include "ui/gfx/geometry/point.h"
++#include "ui/views/layout/layout_provider.h"
+ 
+ namespace {
+ 
+@@ -30,6 +31,9 @@ int TabGroupStyle::GetTabGroupOverlapAdj
+ 
+ // static
+ int TabGroupStyle::GetChipCornerRadius(TabStripOrientation orientation) {
++  if (views::LayoutProvider::UseSquareCorners()) {
++    return 0;
++  }
+   return orientation == TabStripOrientation::kHorizontal
+              ? kCornerRadius
+              : kVerticalCornerRadius;
+--- a/chrome/browser/ui/views/tabs/tab/tab_close_button.cc
++++ b/chrome/browser/ui/views/tabs/tab/tab_close_button.cc
+@@ -24,6 +24,7 @@
+ #include "ui/views/animation/ink_drop.h"
+ #include "ui/views/controls/focus_ring.h"
+ #include "ui/views/controls/highlight_path_generator.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/property_effects.h"
+ #include "ui/views/rect_based_targeting_utils.h"
+ #include "ui/views/view_class_properties.h"
+@@ -79,8 +80,10 @@ TabCloseButton::TabCloseButton(PressedCa
+   // TODO(http://crbug.com/40120351): Make ink drops in RTL work the same way as
+   // focus rings.
+ 
++  const int corner_radius =
++      views::LayoutProvider::UseSquareCorners() ? 0 : kCornerRadius;
+   auto ink_drop_highlight_path =
+-      std::make_unique<views::RoundRectHighlightPathGenerator>(kInkDropInsets, kCornerRadius);
++      std::make_unique<views::RoundRectHighlightPathGenerator>(kInkDropInsets, corner_radius);
+   ink_drop_highlight_path->set_use_contents_bounds(true);
+   ink_drop_highlight_path->set_use_mirrored_rect(true);
+   views::HighlightPathGenerator::Install(this,
+@@ -90,7 +93,7 @@ TabCloseButton::TabCloseButton(PressedCa
+   // TODO(http://crbug.com/40120351): Once this bug is solved and explicit
+   // mirroring for ink drops is not needed, we can combine these two.
+   auto ring_highlight_path =
+-      std::make_unique<views::RoundRectHighlightPathGenerator>(kInkDropInsets, kCornerRadius);
++      std::make_unique<views::RoundRectHighlightPathGenerator>(kInkDropInsets, corner_radius);
+   ring_highlight_path->set_use_contents_bounds(true);
+   views::FocusRing::Get(this)->SetPathGenerator(std::move(ring_highlight_path));
+ 

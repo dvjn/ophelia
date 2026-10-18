@@ -1,0 +1,288 @@
+--- a/chrome/app/settings_strings.grdp
++++ b/chrome/app/settings_strings.grdp
+@@ -286,6 +286,12 @@
+     <message name="IDS_SETTINGS_SQUARE_UI_CORNERS_DESCRIPTION" desc="Description for the toggle which removes rounded corners from the browser UI.">
+       Removes rounded corners from tabs, menus, dialogs and browser pages. Applies after a relaunch.
+     </message>
++    <message name="IDS_SETTINGS_SQUARE_WEB_CORNERS" desc="Label for the toggle which removes rounded corners from websites.">
++      Use square corners on websites
++    </message>
++    <message name="IDS_SETTINGS_SQUARE_WEB_CORNERS_DESCRIPTION" desc="Description for the toggle which removes rounded corners from websites.">
++      Removes rounded corners from every element on every website
++    </message>
+     <message name="IDS_SETTINGS_NATIVE_FRAME_MATERIALS" desc="Label for the toggle which enables or disables native system materials on the browser frame.">
+       Use native frame materials (experimental)
+     </message>
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -6008,7 +6008,8 @@ std::unique_ptr<blink::URLLoaderThrottle
+               policy::policy_prefs::kForceGoogleSafeSearch),
+           profile->GetPrefs()->GetInteger(
+               policy::policy_prefs::kForceYouTubeRestrict),
+-          profile->GetPrefs()->GetString(prefs::kAllowedDomainsForApps));
++          profile->GetPrefs()->GetString(prefs::kAllowedDomainsForApps),
++          profile->GetPrefs()->GetBoolean(prefs::kHeliumSquareWebCorners));
+   return std::make_unique<GoogleURLLoaderThrottle>(
+ #if BUILDFLAG(IS_ANDROID)
+       client_data_header,
+--- a/chrome/browser/extensions/api/settings_private/prefs_util.cc
++++ b/chrome/browser/extensions/api/settings_private/prefs_util.cc
+@@ -333,6 +333,8 @@ const PrefsUtil::TypedPrefMap& PrefsUtil
+       settings_api::PrefType::kBoolean;
+   (*s_allowlist)[::prefs::kHeliumSquareUiCorners] =
+       settings_api::PrefType::kBoolean;
++  (*s_allowlist)[::prefs::kHeliumSquareWebCorners] =
++      settings_api::PrefType::kBoolean;
+ 
+   (*s_allowlist)[::prefs::kShowHomeButton] = settings_api::PrefType::kBoolean;
+   (*s_allowlist)[contextual_search::kDriveConsentState] =
+--- a/chrome/browser/profiles/renderer_updater.cc
++++ b/chrome/browser/profiles/renderer_updater.cc
+@@ -74,6 +74,7 @@ RendererUpdater::RendererUpdater(Profile
+   force_youtube_restrict_.Init(policy::policy_prefs::kForceYouTubeRestrict,
+                                pref_service);
+   allowed_domains_for_apps_.Init(prefs::kAllowedDomainsForApps, pref_service);
++  square_web_corners_.Init(prefs::kHeliumSquareWebCorners, pref_service);
+ 
+   pref_change_registrar_.Init(pref_service);
+   pref_change_registrar_.Add(
+@@ -88,6 +89,10 @@ RendererUpdater::RendererUpdater(Profile
+       prefs::kAllowedDomainsForApps,
+       base::BindRepeating(&RendererUpdater::UpdateAllRenderers,
+                           base::Unretained(this)));
++  pref_change_registrar_.Add(
++      prefs::kHeliumSquareWebCorners,
++      base::BindRepeating(&RendererUpdater::UpdateAllRenderers,
++                          base::Unretained(this)));
+ }
+ 
+ RendererUpdater::~RendererUpdater() {
+@@ -231,5 +236,5 @@ chrome::mojom::DynamicParamsPtr Renderer
+       GetBoundSessionThrottlerParams(),
+ #endif
+       force_google_safesearch_.GetValue(), force_youtube_restrict_.GetValue(),
+-      allowed_domains_for_apps_.GetValue());
++      allowed_domains_for_apps_.GetValue(), square_web_corners_.GetValue());
+ }
+--- a/chrome/browser/profiles/renderer_updater.h
++++ b/chrome/browser/profiles/renderer_updater.h
+@@ -104,6 +104,7 @@ class RendererUpdater : public KeyedServ
+   BooleanPrefMember force_google_safesearch_;
+   IntegerPrefMember force_youtube_restrict_;
+   StringPrefMember allowed_domains_for_apps_;
++  BooleanPrefMember square_web_corners_;
+ };
+ 
+ #endif  // CHROME_BROWSER_PROFILES_RENDERER_UPDATER_H_
+--- a/chrome/browser/resources/settings/appearance_page/appearance_page.html.ts
++++ b/chrome/browser/resources/settings/appearance_page/appearance_page.html.ts
+@@ -129,6 +129,11 @@ export function getHtml(this: SettingsAp
+       ` : ''}
+     </settings-toggle-button>
+     <settings-toggle-button class="hr"
++        pref-key="helium.browser.square_web_corners"
++        label="$i18n{squareWebCorners}"
++        sub-label="$i18n{squareWebCornersDescription}">
++    </settings-toggle-button>
++    <settings-toggle-button class="hr"
+         ?hidden="${!this.showNativeFrameMaterialsOption_}"
+         pref-key="helium.browser.native_frame_materials"
+         label="$i18n{nativeFrameMaterials}"
+--- a/chrome/browser/ui/browser_ui_prefs.cc
++++ b/chrome/browser/ui/browser_ui_prefs.cc
+@@ -135,6 +135,7 @@ void RegisterBrowserUserPrefs(user_prefs
+   registry->RegisterBooleanPref(prefs::kShowZoomIndicator, true);
+ 
+   registry->RegisterBooleanPref(prefs::kHeliumRoundedFrame, true);
++  registry->RegisterBooleanPref(prefs::kHeliumSquareWebCorners, false);
+ 
+   registry->RegisterBooleanPref(prefs::kHeliumNativeFrameMaterials, false);
+ 
+--- a/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
++++ b/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
+@@ -603,6 +603,9 @@ void AddAppearanceStrings(content::WebUI
+       {"squareUiCorners", IDS_SETTINGS_SQUARE_UI_CORNERS},
+       {"squareUiCornersDescription",
+        IDS_SETTINGS_SQUARE_UI_CORNERS_DESCRIPTION},
++      {"squareWebCorners", IDS_SETTINGS_SQUARE_WEB_CORNERS},
++      {"squareWebCornersDescription",
++       IDS_SETTINGS_SQUARE_WEB_CORNERS_DESCRIPTION},
+       {"nativeFrameMaterials", IDS_SETTINGS_NATIVE_FRAME_MATERIALS},
+       {"nativeFrameMaterialsDescription",
+        IDS_SETTINGS_NATIVE_FRAME_MATERIALS_DESCRIPTION},
+--- a/chrome/common/pref_names.h
++++ b/chrome/common/pref_names.h
+@@ -627,6 +627,10 @@ inline constexpr char kHeliumRoundedFram
+ inline constexpr char kHeliumSquareUiCorners[] =
+     "helium.browser.square_ui_corners";
+ 
++// A boolean pref set to true if websites should have no rounded corners.
++inline constexpr char kHeliumSquareWebCorners[] =
++    "helium.browser.square_web_corners";
++
+ // A boolean pref set to true if browser frame surfaces should use native system
+ // materials instead of opaque fills.
+ inline constexpr char kHeliumNativeFrameMaterials[] =
+--- a/chrome/common/renderer_configuration.mojom
++++ b/chrome/common/renderer_configuration.mojom
+@@ -30,6 +30,8 @@ struct DynamicParams {
+   bool force_safe_search = true;
+   int32 youtube_restrict = 0;
+   string allowed_domains_for_apps;
++  // Whether websites should have no rounded corners.
++  bool square_web_corners = false;
+ };
+ 
+ // The renderer configuration parameters are set during the process lock update
+--- a/chrome/renderer/chrome_render_thread_observer.cc
++++ b/chrome/renderer/chrome_render_thread_observer.cc
+@@ -33,6 +33,7 @@
+ #include "chrome/common/url_constants.h"
+ #include "chrome/renderer/chrome_content_renderer_client.h"
+ #include "chrome/renderer/process_state.h"
++#include "chrome/renderer/square_corners_observer.h"
+ #include "components/visitedlink/renderer/visitedlink_reader.h"
+ #include "content/public/child/child_thread.h"
+ #include "content/public/common/content_switches.h"
+@@ -212,6 +213,7 @@ void ChromeRenderThreadObserver::SetInit
+ 
+ void ChromeRenderThreadObserver::SetConfiguration(
+     chrome::mojom::DynamicParamsPtr params) {
++  SquareCornersObserver::SetSquareWebCorners(params->square_web_corners);
+   base::AutoLock lock(dynamic_params_lock_);
+   dynamic_params_ = std::move(params);
+ }
+--- a/chrome/renderer/square_corners_observer.cc
++++ b/chrome/renderer/square_corners_observer.cc
+@@ -4,12 +4,14 @@
+ 
+ #include "chrome/renderer/square_corners_observer.h"
+ 
++#include <set>
++
+ #include "base/command_line.h"
++#include "base/no_destructor.h"
+ #include "chrome/common/chrome_switches.h"
+ #include "content/public/common/url_constants.h"
+ #include "content/public/renderer/render_frame.h"
+ #include "third_party/blink/public/platform/web_string.h"
+-#include "third_party/blink/public/web/web_document.h"
+ #include "third_party/blink/public/web/web_local_frame.h"
+ #include "url/gurl.h"
+ 
+@@ -18,6 +20,13 @@ namespace {
+ constexpr char kSquareCornersStyleSheet[] =
+     "*, ::before, ::after { border-radius: 0 !important; }";
+ 
++bool g_square_web_corners = false;
++
++std::set<SquareCornersObserver*>& GetObservers() {
++  static base::NoDestructor<std::set<SquareCornersObserver*>> observers;
++  return *observers;
++}
++
+ bool IsInternalPage(const GURL& url) {
+   return url.SchemeIs(content::kChromeUIScheme) ||
+          url.SchemeIs(content::kHeliumUIScheme) ||
+@@ -28,17 +37,29 @@ bool IsInternalPage(const GURL& url) {
+ }  // namespace
+ 
+ SquareCornersObserver::SquareCornersObserver(content::RenderFrame* render_frame)
+-    : content::RenderFrameObserver(render_frame) {}
++    : content::RenderFrameObserver(render_frame) {
++  GetObservers().insert(this);
++}
+ 
+-SquareCornersObserver::~SquareCornersObserver() = default;
++SquareCornersObserver::~SquareCornersObserver() {
++  GetObservers().erase(this);
++}
+ 
+-void SquareCornersObserver::DidCreateDocumentElement() {
+-  if (!ShouldSquareCorners()) {
++// static
++void SquareCornersObserver::SetSquareWebCorners(bool square_web_corners) {
++  if (g_square_web_corners == square_web_corners) {
+     return;
+   }
+-  render_frame()->GetWebFrame()->GetDocument().InsertStyleSheet(
+-      blink::WebString::FromAscii(kSquareCornersStyleSheet), nullptr,
+-      blink::WebCssOrigin::kUser);
++  g_square_web_corners = square_web_corners;
++  for (SquareCornersObserver* observer : GetObservers()) {
++    observer->Update();
++  }
++}
++
++void SquareCornersObserver::DidCreateDocumentElement() {
++  // A new document starts without the stylesheet.
++  style_sheet_key_.reset();
++  Update();
+ }
+ 
+ void SquareCornersObserver::OnDestruct() {
+@@ -51,5 +72,22 @@ bool SquareCornersObserver::ShouldSquare
+     return base::CommandLine::ForCurrentProcess()->HasSwitch(
+         switches::kSquareUiCorners);
+   }
+-  return false;
++  return g_square_web_corners;
++}
++
++void SquareCornersObserver::Update() {
++  blink::WebDocument document = render_frame()->GetWebFrame()->GetDocument();
++  if (document.IsNull()) {
++    return;
++  }
++  bool square_corners = ShouldSquareCorners();
++  if (square_corners && !style_sheet_key_) {
++    style_sheet_key_ = document.InsertStyleSheet(
++        blink::WebString::FromAscii(kSquareCornersStyleSheet), nullptr,
++        blink::WebCssOrigin::kUser);
++  } else if (!square_corners && style_sheet_key_) {
++    document.RemoveInsertedStyleSheet(*style_sheet_key_,
++                                      blink::WebCssOrigin::kUser);
++    style_sheet_key_.reset();
++  }
+ }
+--- a/chrome/renderer/square_corners_observer.h
++++ b/chrome/renderer/square_corners_observer.h
+@@ -5,11 +5,15 @@
+ #ifndef CHROME_RENDERER_SQUARE_CORNERS_OBSERVER_H_
+ #define CHROME_RENDERER_SQUARE_CORNERS_OBSERVER_H_
+ 
++#include <optional>
++
+ #include "content/public/renderer/render_frame_observer.h"
++#include "third_party/blink/public/web/web_document.h"
+ 
+ // Removes rounded corners from a frame's documents with a user stylesheet,
+ // which beats the page's own !important rules and also applies inside shadow
+-// trees. Internal pages follow the square browser UI pref.
++// trees. Internal pages follow the square browser UI pref, other pages the
++// square websites pref.
+ class SquareCornersObserver : public content::RenderFrameObserver {
+  public:
+   explicit SquareCornersObserver(content::RenderFrame* render_frame);
+@@ -17,12 +21,21 @@ class SquareCornersObserver : public con
+   SquareCornersObserver& operator=(const SquareCornersObserver&) = delete;
+   ~SquareCornersObserver() override;
+ 
++  // Sets the square websites pref and applies it to every open frame.
++  static void SetSquareWebCorners(bool square_web_corners);
++
+   // content::RenderFrameObserver:
+   void DidCreateDocumentElement() override;
+   void OnDestruct() override;
+ 
+  private:
+   bool ShouldSquareCorners() const;
++
++  // Adds or removes the stylesheet to match ShouldSquareCorners().
++  void Update();
++
++  // The stylesheet inserted into the current document, if any.
++  std::optional<blink::WebStyleSheetKey> style_sheet_key_;
+ };
+ 
+ #endif  // CHROME_RENDERER_SQUARE_CORNERS_OBSERVER_H_
