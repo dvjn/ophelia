@@ -1,0 +1,68 @@
+--- a/content/browser/helium_noise/noise_token_data.cc
++++ b/content/browser/helium_noise/noise_token_data.cc
+@@ -19,6 +19,7 @@
+ #include "base/rand_util.h"
+ #include "base/unguessable_token.h"
+ #include "content/public/browser/browser_context.h"
++#include "content/public/browser/storage_partition_config.h"
+ #include "crypto/hash.h"
+ #include "url/origin.h"
+ 
+@@ -79,12 +80,17 @@ HeliumNoiseTokenData* HeliumNoiseTokenDa
+ // static
+ blink::HeliumNoiseTokenMap HeliumNoiseTokenData::GetTokens(
+     BrowserContext* context,
+-    const url::Origin& origin) {
++    const url::Origin& origin,
++    const StoragePartitionConfig& partition_config) {
+   HeliumNoiseTokenData* data = GetBrowserTokens(context);
+ 
+   std::string domain = !origin.opaque()
+                           ? origin.Serialize()
+                           : base::UnguessableToken::Create().ToString();
++  if (!partition_config.is_default()) {
++    domain += " " + partition_config.partition_domain() + "/" +
++              partition_config.partition_name();
++  }
+ 
+   blink::HeliumNoiseTokenMap result;
+   for (const auto& [feature, session_token] : data->session_tokens_) {
+--- a/content/browser/helium_noise/noise_token_data.h
++++ b/content/browser/helium_noise/noise_token_data.h
+@@ -21,6 +21,7 @@ class Origin;
+ namespace content {
+ 
+ class BrowserContext;
++class StoragePartitionConfig;
+ 
+ // A user data class that generates and stores BrowserContext-associated noise
+ // tokens used for noising fingerprintable data.
+@@ -31,9 +32,13 @@ class CONTENT_EXPORT HeliumNoiseTokenDat
+ 
+   // Gets a map of BrowserContext-associated & feature-specific noise tokens
+   // computed with the main frame's origin. If the origin is opaque, a random
+-  // value will be used instead.
+-  static blink::HeliumNoiseTokenMap GetTokens(BrowserContext* context,
+-                                              const url::Origin& origin);
++  // value will be used instead. Pages in a non-default StoragePartition, such
++  // as a container, get tokens of their own, so the noise can't link them to
++  // the same site in other partitions.
++  static blink::HeliumNoiseTokenMap GetTokens(
++      BrowserContext* context,
++      const url::Origin& origin,
++      const StoragePartitionConfig& partition_config);
+ 
+   // Regenerates all noise tokens, returning a HeliumNoiseTokenData instance.
+   static HeliumNoiseTokenData* RegenerateTokens(BrowserContext* context);
+--- a/content/browser/renderer_host/navigation_request.cc
++++ b/content/browser/renderer_host/navigation_request.cc
+@@ -9883,7 +9883,8 @@ void NavigationRequest::ReadyToCommitNav
+     if (GetContentClient()->browser()->HeliumNoiseEnabled(
+             browser_context, origin_to_commit->GetURL())) {
+       noise_tokens_ = HeliumNoiseTokenData::GetTokens(
+-          browser_context, origin_to_commit.value());
++          browser_context, origin_to_commit.value(),
++          GetRenderFrameHost()->GetStoragePartition()->GetConfig());
+     }
+   }
+ 

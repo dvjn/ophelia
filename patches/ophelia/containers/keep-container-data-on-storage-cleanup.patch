@@ -1,0 +1,108 @@
+--- a/chrome/browser/containers/BUILD.gn
++++ b/chrome/browser/containers/BUILD.gn
+@@ -6,6 +6,8 @@ source_set("containers") {
+   sources = [
+     "container_color.cc",
+     "container_color.h",
++    "container_data.cc",
++    "container_data.h",
+     "containers_service_factory.cc",
+     "containers_service_factory.h",
+     "containers_tab_util.cc",
+@@ -26,6 +28,7 @@ source_set("containers") {
+     "//components/containers/core/browser",
+     "//components/containers/core/common",
+     "//components/keyed_service/core",
++    "//components/prefs",
+     "//ui/base",
+   ]
+ }
+--- /dev/null
++++ b/chrome/browser/containers/container_data.cc
+@@ -0,0 +1,30 @@
++// Copyright 2026 The Ophelia Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#include "chrome/browser/containers/container_data.h"
++
++#include "chrome/browser/profiles/profile.h"
++#include "components/containers/content/browser/storage_partition_utils.h"
++#include "components/containers/core/browser/prefs.h"
++#include "components/prefs/pref_service.h"
++#include "content/public/browser/storage_partition.h"
++
++namespace containers {
++
++std::unordered_set<base::FilePath> GetContainerStoragePartitionPaths(
++    Profile* profile) {
++  std::unordered_set<base::FilePath> paths;
++  // Read the prefs rather than the service, which doesn't exist while
++  // containers are off, so that their data is kept for when they're back on.
++  for (const mojom::ContainerPtr& container :
++       GetContainersFromPrefs(*profile->GetPrefs())) {
++    paths.insert(profile
++                     ->GetStoragePartition(GetStoragePartitionConfigForContainer(
++                         profile, container->id))
++                     ->GetPath());
++  }
++  return paths;
++}
++
++}  // namespace containers
+--- /dev/null
++++ b/chrome/browser/containers/container_data.h
+@@ -0,0 +1,23 @@
++// Copyright 2026 The Ophelia Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_CONTAINERS_CONTAINER_DATA_H_
++#define CHROME_BROWSER_CONTAINERS_CONTAINER_DATA_H_
++
++#include <unordered_set>
++
++#include "base/files/file_path.h"
++
++class Profile;
++
++namespace containers {
++
++// Returns the StoragePartition paths of `profile`'s containers, which
++// StoragePartition garbage collection must keep.
++std::unordered_set<base::FilePath> GetContainerStoragePartitionPaths(
++    Profile* profile);
++
++}  // namespace containers
++
++#endif  // CHROME_BROWSER_CONTAINERS_CONTAINER_DATA_H_
+--- a/chrome/browser/web_applications/BUILD.gn
++++ b/chrome/browser/web_applications/BUILD.gn
+@@ -555,6 +555,7 @@ source_set("web_applications") {
+     "//chrome/browser/apps:user_type_filter",
+     "//chrome/browser/browsing_data",
+     "//chrome/browser/browsing_data:constants",
++    "//chrome/browser/containers",
+     "//chrome/browser/content_settings:content_settings_factory",
+     "//chrome/browser/favicon",
+     "//chrome/browser/image_decoder",
+--- a/chrome/browser/web_applications/commands/garbage_collect_storage_partitions_command.cc
++++ b/chrome/browser/web_applications/commands/garbage_collect_storage_partitions_command.cc
+@@ -14,6 +14,7 @@
+ #include "base/functional/concurrent_closures.h"
+ #include "base/memory/weak_ptr.h"
+ #include "base/values.h"
++#include "chrome/browser/containers/container_data.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/web_applications/extensions_manager.h"
+ #include "chrome/browser/web_applications/locks/all_apps_lock.h"
+@@ -74,6 +75,9 @@ void GarbageCollectStoragePartitionsComm
+   // Get all paths from Web App system.
+   allowlist.merge(lock_->isolation_delegate().GetIsolatedStoragePaths());
+ 
++  // Keep the data of every container.
++  allowlist.merge(containers::GetContainerStoragePartitionPaths(profile_));
++
+   base::ListValue* debug_paths =
+       GetMutableDebugValue().EnsureList("allow_list_paths");
+   for (const auto& path : allowlist) {

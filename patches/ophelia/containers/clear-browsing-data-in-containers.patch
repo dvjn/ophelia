@@ -1,0 +1,206 @@
+--- a/chrome/browser/browsing_data/BUILD.gn
++++ b/chrome/browser/browsing_data/BUILD.gn
+@@ -103,6 +103,7 @@ source_set("impl") {
+     "//chrome/browser/autofill",
+     "//chrome/browser/bookmarks",
+     "//chrome/browser/commerce",
++    "//chrome/browser/containers",
+     "//chrome/browser/content_settings:content_settings_factory",
+     "//chrome/browser/crash_upload_list",
+     "//chrome/browser/custom_handlers",
+--- a/chrome/browser/browsing_data/chrome_browsing_data_remover_delegate.cc
++++ b/chrome/browser/browsing_data/chrome_browsing_data_remover_delegate.cc
+@@ -38,6 +38,7 @@
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/browsing_data/chrome_browsing_data_remover_constants.h"
+ #include "chrome/browser/browsing_data/navigation_entry_remover.h"
++#include "chrome/browser/containers/container_data.h"
+ #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
+ #include "chrome/browser/crash_upload_list/crash_upload_list.h"
+ #include "chrome/browser/custom_handlers/protocol_handler_registry_factory.h"
+@@ -1474,6 +1475,30 @@ void ChromeBrowsingDataRemoverDelegate::
+ #endif  // !BUILDFLAG(IS_ANDROID)
+ 
+   //////////////////////////////////////////////////////////////////////////////
++  // Containers.
++  // If no StoragePartition was specified in the filter, repeat the removal of
++  // the StoragePartition data types for every container, with the same origin
++  // and time filters, so that clearing data also clears it in containers.
++  if (!filter_builder->GetStoragePartitionConfig().has_value()) {
++    const uint64_t container_remove_mask =
++        content::BrowsingDataRemover::DATA_TYPE_ON_STORAGE_PARTITION &
++        remove_mask;
++    if (container_remove_mask) {
++      for (const content::StoragePartitionConfig& partition :
++           containers::GetContainerStoragePartitionConfigs(profile_)) {
++        // We can't wait for the `RemoveWithFilter` call to finish because
++        // BrowsingDataRemover doesn't support nested Remove calls.
++        std::unique_ptr<content::BrowsingDataFilterBuilder>
++            container_filter_builder = filter_builder->Copy();
++        container_filter_builder->SetStoragePartitionConfig(partition);
++        profile_->GetBrowsingDataRemover()->RemoveWithFilter(
++            delete_begin, delete_end, container_remove_mask,
++            origin_type_mask, std::move(container_filter_builder));
++      }
++    }
++  }
++
++  //////////////////////////////////////////////////////////////////////////////
+   // DATA_TYPE_TABS
+   if (remove_mask & constants::DATA_TYPE_TABS) {
+ #if BUILDFLAG(IS_ANDROID)
+--- a/chrome/browser/containers/container_data.cc
++++ b/chrome/browser/containers/container_data.cc
+@@ -4,6 +4,10 @@
+ 
+ #include "chrome/browser/containers/container_data.h"
+ 
++#include <memory>
++#include <string>
++#include <vector>
++
+ #include "base/functional/callback_helpers.h"
+ #include "base/time/time.h"
+ #include "chrome/browser/profiles/profile.h"
+@@ -11,8 +15,11 @@
+ #include "components/containers/content/browser/storage_partition_utils.h"
+ #include "components/containers/core/browser/prefs.h"
+ #include "components/prefs/pref_service.h"
++#include "content/public/browser/browsing_data_filter_builder.h"
++#include "content/public/browser/browsing_data_remover.h"
+ #include "content/public/browser/host_zoom_map.h"
+ #include "content/public/browser/storage_partition.h"
++#include "net/base/registry_controlled_domains/registry_controlled_domain.h"
+ #include "services/network/public/mojom/clear_data_filter.mojom.h"
+ #include "services/network/public/mojom/cookie_manager.mojom.h"
+ #include "services/network/public/mojom/network_context.mojom.h"
+@@ -43,17 +50,54 @@ void DeleteContainerData(Profile* profil
+       ::prefs::kShouldGarbageCollectStoragePartitions, true);
+ }
+ 
+-std::unordered_set<base::FilePath> GetContainerStoragePartitionPaths(
++void DeleteContainerSiteData(Profile* profile,
++                             const std::vector<url::Origin>& origins) {
++  std::unique_ptr<content::BrowsingDataFilterBuilder> filter_builder =
++      content::BrowsingDataFilterBuilder::Create(
++          content::BrowsingDataFilterBuilder::Mode::kDelete);
++  for (const url::Origin& origin : origins) {
++    if (!origin.GetURL().SchemeIsHTTPOrHTTPS()) {
++      continue;
++    }
++    std::string site = net::registry_controlled_domains::GetDomainAndRegistry(
++        origin, net::registry_controlled_domains::INCLUDE_PRIVATE_REGISTRIES);
++    filter_builder->AddRegisterableDomain(site.empty() ? origin.host() : site);
++  }
++  if (filter_builder->MatchesNothing()) {
++    return;
++  }
++
++  for (const content::StoragePartitionConfig& config :
++       GetContainerStoragePartitionConfigs(profile)) {
++    std::unique_ptr<content::BrowsingDataFilterBuilder>
++        container_filter_builder = filter_builder->Copy();
++    container_filter_builder->SetStoragePartitionConfig(config);
++    profile->GetBrowsingDataRemover()->RemoveWithFilter(
++        base::Time(), base::Time::Max(),
++        content::BrowsingDataRemover::DATA_TYPE_ON_STORAGE_PARTITION,
++        content::BrowsingDataRemover::ORIGIN_TYPE_UNPROTECTED_WEB |
++            content::BrowsingDataRemover::ORIGIN_TYPE_PROTECTED_WEB,
++        std::move(container_filter_builder));
++  }
++}
++
++std::vector<content::StoragePartitionConfig> GetContainerStoragePartitionConfigs(
+     Profile* profile) {
+-  std::unordered_set<base::FilePath> paths;
+-  // Read the prefs rather than the service, which doesn't exist while
+-  // containers are off, so that their data is kept for when they're back on.
++  std::vector<content::StoragePartitionConfig> configs;
+   for (const mojom::ContainerPtr& container :
+        GetContainersFromPrefs(*profile->GetPrefs())) {
+-    paths.insert(profile
+-                     ->GetStoragePartition(GetStoragePartitionConfigForContainer(
+-                         profile, container->id))
+-                     ->GetPath());
++    configs.push_back(
++        GetStoragePartitionConfigForContainer(profile, container->id));
++  }
++  return configs;
++}
++
++std::unordered_set<base::FilePath> GetContainerStoragePartitionPaths(
++    Profile* profile) {
++  std::unordered_set<base::FilePath> paths;
++  for (const content::StoragePartitionConfig& config :
++       GetContainerStoragePartitionConfigs(profile)) {
++    paths.insert(profile->GetStoragePartition(config)->GetPath());
+   }
+   return paths;
+ }
+--- a/chrome/browser/containers/container_data.h
++++ b/chrome/browser/containers/container_data.h
+@@ -7,8 +7,11 @@
+ 
+ #include <string_view>
+ #include <unordered_set>
++#include <vector>
+ 
+ #include "base/files/file_path.h"
++#include "content/public/browser/storage_partition_config.h"
++#include "url/origin.h"
+ 
+ class Profile;
+ 
+@@ -20,6 +23,19 @@ namespace containers {
+ // the container's tabs are closed and the container is removed.
+ void DeleteContainerData(Profile* profile, std::string_view container_id);
+ 
++// Deletes the site data of the sites of `origins` in all of `profile`'s
++// containers, for the site data pages, which only list the profile's own
++// data. Clears whole sites, since site data in containers isn't listed by
++// origin.
++void DeleteContainerSiteData(Profile* profile,
++                             const std::vector<url::Origin>& origins);
++
++// Returns the StoragePartition configs of `profile`'s containers. Reads the
++// prefs rather than the service, which doesn't exist while containers are
++// off, so that their data is still covered then.
++std::vector<content::StoragePartitionConfig> GetContainerStoragePartitionConfigs(
++    Profile* profile);
++
+ // Returns the StoragePartition paths of `profile`'s containers, which
+ // StoragePartition garbage collection must keep.
+ std::unordered_set<base::FilePath> GetContainerStoragePartitionPaths(
+--- a/chrome/browser/containers/BUILD.gn
++++ b/chrome/browser/containers/BUILD.gn
+@@ -30,7 +30,9 @@ source_set("containers") {
+     "//components/containers/core/common",
+     "//components/keyed_service/core",
+     "//components/prefs",
++    "//net",
+     "//services/network/public/mojom",
+     "//ui/base",
++    "//url",
+   ]
+ }
+--- a/chrome/browser/ui/webui/settings/site_settings_handler.cc
++++ b/chrome/browser/ui/webui/settings/site_settings_handler.cc
+@@ -37,6 +37,7 @@
+ #include "chrome/browser/bluetooth/bluetooth_chooser_context_factory.h"
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/browsing_data/chrome_browsing_data_model_delegate.h"
++#include "chrome/browser/containers/container_data.h"
+ #include "chrome/browser/content_settings/chrome_content_settings_utils.h"
+ #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
+ #include "chrome/browser/file_system_access/chrome_file_system_access_permission_context.h"
+@@ -2659,6 +2660,10 @@ void SiteSettingsHandler::RemoveNonModel
+     return;
+   }
+ 
++  // The model only holds the profile's own site data, so delete the same
++  // sites in containers too.
++  containers::DeleteContainerSiteData(profile_, origins);
++
+   // TODO(crbug.com/40204789): Remove client hint information, which cannot be
+   // associated with Cookie node information as the scheme in the cookie node
+   // may not match due to HTTP / HTTPS distinction issues.

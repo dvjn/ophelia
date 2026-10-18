@@ -1,0 +1,243 @@
+--- a/chrome/browser/containers/container_data.cc
++++ b/chrome/browser/containers/container_data.cc
+@@ -81,6 +81,13 @@ void DeleteContainerSiteData(Profile* pr
+   }
+ }
+ 
++void DeleteStaleContainerSessionData(Profile* profile) {
++  for (const content::StoragePartitionConfig& config :
++       GetContainerStoragePartitionConfigs(profile)) {
++    profile->GetStoragePartition(config)->DeleteStaleSessionData();
++  }
++}
++
+ std::vector<content::StoragePartitionConfig> GetContainerStoragePartitionConfigs(
+     Profile* profile) {
+   std::vector<content::StoragePartitionConfig> configs;
+--- a/chrome/browser/containers/container_data.h
++++ b/chrome/browser/containers/container_data.h
+@@ -30,6 +30,12 @@ void DeleteContainerData(Profile* profil
+ void DeleteContainerSiteData(Profile* profile,
+                              const std::vector<url::Origin>& origins);
+ 
++// Deletes leftover sessionStorage and session-only cookies in all of
++// `profile`'s containers, like StoragePartition::DeleteStaleSessionData() does
++// for the profile's own partition. Call it wherever that is called for the
++// default partition, once a session restore can no longer need the data.
++void DeleteStaleContainerSessionData(Profile* profile);
++
+ // Returns the StoragePartition configs of `profile`'s containers. Reads the
+ // prefs rather than the service, which doesn't exist while containers are
+ // off, so that their data is still covered then.
+--- a/chrome/browser/sessions/session_restore.cc
++++ b/chrome/browser/sessions/session_restore.cc
+@@ -40,6 +40,7 @@
+ #include "build/build_config.h"
+ #include "chrome/browser/after_startup_task_utils.h"
+ #include "chrome/browser/browser_process.h"
++#include "chrome/browser/containers/container_data.h"
+ #include "chrome/browser/containers/containers_tab_util.h"
+ #include "chrome/browser/buildflags.h"
+ #include "chrome/browser/prefs/session_startup_pref.h"
+@@ -90,6 +91,7 @@
+ #include "chrome/common/extensions/extension_metrics.h"
+ #include "chrome/common/pref_names.h"
+ #include "chrome/common/url_constants.h"
++#include "components/containers/content/browser/storage_partition_utils.h"
+ #include "components/keep_alive_registry/keep_alive_types.h"
+ #include "components/keep_alive_registry/scoped_keep_alive.h"
+ #include "components/prefs/pref_service.h"
+@@ -788,6 +790,7 @@ class SessionRestoreImpl : public Browse
+       // Restore was unsuccessful. The cookie/storage systems can also delete
+       // their data, since no session restore will happen at a later point.
+       profile_->GetDefaultStoragePartition()->DeleteStaleSessionData();
++      containers::DeleteStaleContainerSessionData(profile_);
+       return FinishedTabCreation(false, false, restored_tabs);
+     }
+ 
+@@ -1001,6 +1004,7 @@ class SessionRestoreImpl : public Browse
+     // Session cookies/storage needed for the session restore have now been
+     // recreated by RestoreTab so it's safe to start deleting leftover data.
+     profile_->GetDefaultStoragePartition()->DeleteStaleSessionData();
++    containers::DeleteStaleContainerSessionData(profile_);
+ 
+     return last_normal_browser ? last_normal_browser : last_app_browser;
+   }
+@@ -1145,10 +1149,21 @@ class SessionRestoreImpl : public Browse
+     scoped_refptr<content::SessionStorageNamespaceHandle>
+         session_storage_namespace;
+     if (!tab.session_storage_persistent_id.empty()) {
++      // A container tab's sessionStorage lives in the container's partition.
++      content::StoragePartition* partition =
++          profile_->GetDefaultStoragePartition();
++      if (auto it =
++              tab.extra_data.find(containers::kContainerIdTabExtraDataKey);
++          it != tab.extra_data.end()) {
++        if (std::optional<content::StoragePartitionConfig> config =
++                containers::FindContainerStoragePartition(profile_,
++                                                          it->second)) {
++          partition = profile_->GetStoragePartition(*config);
++        }
++      }
+       session_storage_namespace =
+-          profile_->GetDefaultStoragePartition()
+-              ->GetDOMStorageContext()
+-              ->RecreateSessionStorage(tab.session_storage_persistent_id);
++          partition->GetDOMStorageContext()->RecreateSessionStorage(
++              tab.session_storage_persistent_id);
+     }
+ 
+     // Relabel group IDs to prevent duplicating groups. See crbug.com/40055647.
+--- a/chrome/browser/sessions/session_service_base.cc
++++ b/chrome/browser/sessions/session_service_base.cc
+@@ -55,10 +55,12 @@
+ #include "components/tab_groups/tab_group_id.h"
+ #include "components/tabs/public/split_tab_data.h"
+ #include "components/tabs/public/tab_group.h"
++#include "content/public/browser/browser_context.h"
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/navigation_details.h"
+ #include "content/public/browser/navigation_entry.h"
+ #include "content/public/browser/session_storage_namespace_handle.h"
++#include "content/public/browser/storage_partition.h"
+ #include "ui/base/mojom/window_show_state.mojom.h"
+ 
+ #if BUILDFLAG(IS_MAC)
+@@ -84,6 +86,22 @@ using sessions::SerializedNavigationEntr
+ 
+ namespace {
+ 
++// Returns the sessionStorage namespace of `contents`' own StoragePartition,
++// which isn't the default one for a tab in a container.
++content::SessionStorageNamespaceHandle* GetTabSessionStorageNamespace(
++    WebContents* contents) {
++  const content::StoragePartitionConfig& config =
++      contents->GetBrowserContext()
++          ->GetStoragePartition(contents->GetSiteInstance())
++          ->GetConfig();
++  const content::SessionStorageNamespaceHandleMap& namespaces =
++      contents->GetController().GetSessionStorageNamespaceMap();
++  auto it = namespaces.find(config);
++  return it != namespaces.end()
++             ? it->second.get()
++             : contents->GetController().GetDefaultSessionStorageNamespace();
++}
++
+ // Every kWritesPerReset commands triggers recreating the file.
+ const int kWritesPerReset = 250;
+ 
+@@ -300,7 +318,7 @@ void SessionServiceBase::TabInserted(Web
+   // just the default. This in particular will not work for tabs with only
+   // isolated apps which won't have a default partition.
+   content::SessionStorageNamespaceHandle* session_storage_namespace =
+-      contents->GetController().GetDefaultSessionStorageNamespace();
++      GetTabSessionStorageNamespace(contents);
+   ScheduleCommand(sessions::CreateSessionStorageAssociatedCommand(
+       session_tab_helper->session_id(), session_storage_namespace->id()));
+   session_storage_namespace->SetShouldPersist(true);
+@@ -316,7 +334,7 @@ void SessionServiceBase::TabClosing(WebC
+   // Allow the associated sessionStorage to get deleted; it won't be needed
+   // in the session restore.
+   content::SessionStorageNamespaceHandle* session_storage_namespace =
+-      contents->GetController().GetDefaultSessionStorageNamespace();
++      GetTabSessionStorageNamespace(contents);
+   session_storage_namespace->SetShouldPersist(false);
+   sessions::SessionTabHelper* session_tab_helper =
+       sessions::SessionTabHelper::FromWebContents(contents);
+@@ -688,7 +706,7 @@ void SessionServiceBase::BuildCommandsFo
+ 
+   // Record the association between the sessionStorage namespace and the tab.
+   content::SessionStorageNamespaceHandle* session_storage_namespace =
+-      tab->GetController().GetDefaultSessionStorageNamespace();
++      GetTabSessionStorageNamespace(tab);
+   ScheduleCommand(sessions::CreateSessionStorageAssociatedCommand(
+       session_tab_helper->session_id(), session_storage_namespace->id()));
+ }
+--- a/chrome/browser/ui/browser_tabrestore.cc
++++ b/chrome/browser/ui/browser_tabrestore.cc
+@@ -75,8 +75,9 @@ std::unique_ptr<WebContents> CreateResto
+       content::CreateMapWithDefaultSessionStorageNamespace(
+           browser->GetProfile(), session_storage_namespace);
+   WebContents::CreateParams create_params(browser->GetProfile());
+-  // A tab from a container goes back into it. If the container was deleted or
+-  // containers are off, the tab is restored as a normal tab.
++  // A tab from a container goes back into it, with its sessionStorage. If the
++  // container was deleted or containers are off, the tab is restored as a
++  // normal tab.
+   if (auto it = extra_data.find(containers::kContainerIdTabExtraDataKey);
+       it != extra_data.end() && !navigations.empty()) {
+     if (std::optional<content::StoragePartitionConfig> config =
+@@ -86,6 +87,10 @@ std::unique_ptr<WebContents> CreateResto
+           content::SiteInstance::CreateForFixedStoragePartition(
+               browser->GetProfile(),
+               navigations[selected_navigation].virtual_url(), *config);
++      session_storage_namespace_map.clear();
++      if (session_storage_namespace) {
++        session_storage_namespace_map[*config] = session_storage_namespace;
++      }
+     }
+   }
+   create_params.initially_hidden = initially_hidden;
+--- a/chrome/browser/ui/startup/startup_browser_creator_impl.cc
++++ b/chrome/browser/ui/startup/startup_browser_creator_impl.cc
+@@ -23,6 +23,7 @@
+ #include "build/build_config.h"
+ #include "chrome/browser/apps/platform_apps/install_chrome_app.h"
+ #include "chrome/browser/browser_process.h"
++#include "chrome/browser/containers/container_data.h"
+ #include "chrome/browser/containers/containers_tab_util.h"
+ #include "chrome/browser/custom_handlers/protocol_handler_registry_factory.h"
+ #include "chrome/browser/defaults.h"
+@@ -835,6 +836,7 @@ BrowserWindowInterface* StartupBrowserCr
+   // cookie/storage, unless this is a crash recovery.
+   if (!is_post_crash_launch) {
+     profile_->GetDefaultStoragePartition()->DeleteStaleSessionData();
++    containers::DeleteStaleContainerSessionData(profile_);
+   }
+ 
+   return browser;
+--- a/components/sessions/content/content_platform_specific_tab_data.cc
++++ b/components/sessions/content/content_platform_specific_tab_data.cc
+@@ -4,17 +4,38 @@
+ 
+ #include "components/sessions/content/content_platform_specific_tab_data.h"
+ 
++#include "content/public/browser/browser_context.h"
+ #include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/session_storage_namespace_handle.h"
++#include "content/public/browser/storage_partition.h"
+ #include "content/public/browser/web_contents.h"
+ 
+ namespace sessions {
+ 
++namespace {
++
++// Returns the sessionStorage namespace of `web_contents`' own
++// StoragePartition, which isn't the default one for a tab with a fixed
++// partition, like a container tab.
++content::SessionStorageNamespaceHandle* GetSessionStorageNamespace(
++    content::WebContents* web_contents) {
++  const content::StoragePartitionConfig& config =
++      web_contents->GetBrowserContext()
++          ->GetStoragePartition(web_contents->GetSiteInstance())
++          ->GetConfig();
++  const content::SessionStorageNamespaceHandleMap& namespaces =
++      web_contents->GetController().GetSessionStorageNamespaceMap();
++  auto it = namespaces.find(config);
++  return it != namespaces.end()
++             ? it->second.get()
++             : web_contents->GetController().GetDefaultSessionStorageNamespace();
++}
++
++}  // namespace
++
+ ContentPlatformSpecificTabData::ContentPlatformSpecificTabData(
+     content::WebContents* web_contents)
+-    :  // TODO(ajwong): This does not correctly handle storage for isolated
+-       // apps.
+-      session_storage_namespace_(
+-          web_contents->GetController().GetDefaultSessionStorageNamespace()) {}
++    : session_storage_namespace_(GetSessionStorageNamespace(web_contents)) {}
+ 
+ ContentPlatformSpecificTabData::ContentPlatformSpecificTabData() = default;
+ ContentPlatformSpecificTabData::~ContentPlatformSpecificTabData() = default;

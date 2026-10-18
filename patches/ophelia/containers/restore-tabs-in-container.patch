@@ -1,0 +1,286 @@
+--- a/chrome/browser/sessions/BUILD.gn
++++ b/chrome/browser/sessions/BUILD.gn
+@@ -124,6 +124,7 @@ source_set("impl") {
+ 
+     deps += [
+       "//chrome/browser:after_startup_task_utils",
++      "//chrome/browser/containers",
+       "//chrome/browser/content_settings:content_settings_factory",
+       "//chrome/browser/devtools",
+       "//chrome/browser/extensions",
+@@ -150,6 +151,7 @@ source_set("impl") {
+       "//chrome/browser/ui/window_feature_controller",
+       "//chrome/browser/ui/window_metadata",
+       "//chrome/browser/web_applications",
++      "//components/containers/content/browser",
+       "//components/keep_alive_registry",
+       "//components/media_device_salt",
+       "//components/pref_registry",
+--- a/chrome/browser/sessions/session_service_base.cc
++++ b/chrome/browser/sessions/session_service_base.cc
+@@ -40,6 +40,7 @@
+ #include "chrome/browser/ui/ui_features.h"
+ #include "chrome/browser/ui/window_feature_controller/window_feature_controller.h"
+ #include "chrome/browser/ui/window_metadata/window_metadata_controller.h"
++#include "components/containers/content/browser/storage_partition_utils.h"
+ #include "components/saved_tab_groups/public/tab_group_sync_service.h"
+ #include "components/sessions/content/content_serialized_navigation_builder.h"
+ #include "components/sessions/content/session_tab_helper.h"
+@@ -285,6 +286,12 @@ void SessionServiceBase::TabInserted(Web
+     SetTabExtensionAppID(session_tab_helper->window_id(),
+                          session_tab_helper->session_id(), app_id);
+   }
++  if (std::optional<std::string> container_id =
++          containers::GetContainerIdForWebContents(contents)) {
++    ScheduleCommand(sessions::CreateAddTabExtraDataCommand(
++        session_tab_helper->session_id(),
++        containers::kContainerIdTabExtraDataKey, *container_id));
++  }
+ 
+   // Record the association between the SessionStorageNamespaceHandle and the
+   // tab.
+@@ -640,6 +647,13 @@ void SessionServiceBase::BuildCommandsFo
+     command_storage_manager()->AppendRebuildCommand(
+         sessions::CreateSetTabExtensionAppIDCommand(session_id, app_id));
+   }
++  if (std::optional<std::string> container_id =
++          containers::GetContainerIdForWebContents(tab)) {
++    command_storage_manager()->AppendRebuildCommand(
++        sessions::CreateAddTabExtraDataCommand(
++            session_id, containers::kContainerIdTabExtraDataKey,
++            *container_id));
++  }
+ 
+   for (int i = min_index; i < max_index; ++i) {
+     NavigationEntry* entry = (i == pending_index)
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -402,6 +402,7 @@ if (!is_android) {
+       ":tab_ui_helper",
+       "//base",
+       "//chrome/browser/apps/app_service",
++      "//chrome/browser/containers",
+       "//chrome/browser/glic",
+       "//chrome/browser/profiles:profile",
+       "//chrome/browser/sessions",
+@@ -412,6 +413,7 @@ if (!is_android) {
+       "//chrome/browser/ui/tabs:tab_strip",
+       "//chrome/browser/ui/webui_browser",
+       "//chrome/common:buildflags",
++      "//components/containers/content/browser",
+       "//components/sessions",
+       "//components/tab_groups",
+       "//components/tabs:public",
+@@ -862,6 +864,7 @@ static_library("ui") {
+     "//chrome/browser/commerce",
+     "//chrome/browser/complex_tasks",
+     "//chrome/browser/component_updater",
++    "//chrome/browser/containers",
+     "//chrome/browser/content_settings",
+     "//chrome/browser/content_settings:content_settings_factory_impl",
+     "//chrome/browser/content_settings:content_settings_util",
+@@ -1014,6 +1017,7 @@ static_library("ui") {
+     "//components/commerce/content/browser",
+     "//components/commerce/core:feature_list",
+     "//components/consent_auditor/",
++    "//components/containers/content/browser",
+     "//components/content_capture/common",
+     "//components/crash/core/app",
+     "//components/dom_distiller/content/browser",
+--- a/chrome/browser/ui/browser_live_tab_context.cc
++++ b/chrome/browser/ui/browser_live_tab_context.cc
+@@ -14,6 +14,7 @@
+ #include "base/uuid.h"
+ #include "base/values.h"
+ #include "chrome/browser/apps/app_service/web_contents_app_id_utils.h"
++#include "chrome/browser/containers/containers_tab_util.h"
+ #include "chrome/browser/glic/glic_tab_restore_helper.h"
+ #include "chrome/browser/performance_manager/public/background_tab_loading_policy.h"
+ #include "chrome/browser/profiles/profile.h"
+@@ -37,6 +38,7 @@
+ #include "chrome/browser/ui/ui_features.h"
+ #include "chrome/browser/ui/window_metadata/window_metadata_controller.h"
+ #include "chrome/browser/web_applications/web_app_helpers.h"
++#include "components/containers/content/browser/storage_partition_utils.h"
+ #include "components/saved_tab_groups/public/features.h"
+ #include "components/saved_tab_groups/public/saved_tab_group.h"
+ #include "components/saved_tab_groups/public/tab_group_sync_service.h"
+@@ -178,6 +180,11 @@ std::map<std::string, std::string> Brows
+ 
+   glic::PopulateGlicExtraData(tab_strip_model_->GetTabAtIndex(index),
+                               &extra_data);
++  if (std::optional<std::string> container_id =
++          containers::GetContainerIdForWebContents(
++              tab_strip_model_->GetWebContentsAt(index))) {
++    extra_data[containers::kContainerIdTabExtraDataKey] = *container_id;
++  }
+ 
+   return extra_data;
+ }
+@@ -326,6 +333,10 @@ sessions::LiveTab* BrowserLiveTabContext
+     bool select,
+     bool is_restoring_group_or_window,
+     sessions::tab_restore::Type original_session_type) {
++  if (!containers::CanRestoreTab(&profile_.get(), tab.extra_data)) {
++    return nullptr;
++  }
++
+   tab_groups::TabGroupSyncService* tab_group_service =
+       tab_groups::TabGroupSyncServiceFactory::GetForProfile(&profile_.get());
+   CHECK(tab_group_service);
+@@ -439,6 +450,10 @@ sessions::LiveTab* BrowserLiveTabContext
+ 
+ sessions::LiveTab* BrowserLiveTabContext::ReplaceRestoredTab(
+     const sessions::tab_restore::Tab& tab) {
++  if (!containers::CanRestoreTab(&profile_.get(), tab.extra_data)) {
++    return nullptr;
++  }
++
+   const sessions::tab_restore::PlatformSpecificTabData* tab_platform_data =
+       tab.platform_data.get();
+   SessionStorageNamespaceHandle* storage_namespace =
+--- a/chrome/browser/ui/browser_tabrestore.cc
++++ b/chrome/browser/ui/browser_tabrestore.cc
+@@ -11,6 +11,7 @@
+ #include "base/containers/span.h"
+ #include "build/build_config.h"
+ #include "chrome/browser/apps/app_service/web_contents_app_id_utils.h"
++#include "chrome/browser/containers/containers_tab_util.h"
+ #include "chrome/browser/glic/glic_tab_restore_helper.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/sessions/session_restore.h"
+@@ -26,6 +27,7 @@
+ #include "chrome/browser/ui/tabs/tab_strip_model.h"
+ #include "chrome/browser/ui/webui_browser/webui_browser.h"
+ #include "chrome/common/buildflags.h"
++#include "components/containers/content/browser/storage_partition_utils.h"
+ #include "components/favicon/content/content_favicon_driver.h"
+ #include "components/sessions/content/content_serialized_navigation_builder.h"
+ #include "components/tab_groups/tab_group_id.h"
+@@ -36,6 +38,7 @@
+ #include "content/public/browser/render_widget_host_view.h"
+ #include "content/public/browser/restore_type.h"
+ #include "content/public/browser/session_storage_namespace_handle.h"
++#include "content/public/browser/site_instance.h"
+ #include "content/public/browser/web_contents.h"
+ #include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
+ #include "ui/gfx/geometry/size.h"
+@@ -72,6 +75,19 @@ std::unique_ptr<WebContents> CreateResto
+       content::CreateMapWithDefaultSessionStorageNamespace(
+           browser->GetProfile(), session_storage_namespace);
+   WebContents::CreateParams create_params(browser->GetProfile());
++  // A tab from a container goes back into it. If the container was deleted or
++  // containers are off, the tab is restored as a normal tab.
++  if (auto it = extra_data.find(containers::kContainerIdTabExtraDataKey);
++      it != extra_data.end() && !navigations.empty()) {
++    if (std::optional<content::StoragePartitionConfig> config =
++            containers::FindContainerStoragePartition(browser->GetProfile(),
++                                                      it->second)) {
++      create_params.site_instance =
++          content::SiteInstance::CreateForFixedStoragePartition(
++              browser->GetProfile(),
++              navigations[selected_navigation].virtual_url(), *config);
++    }
++  }
+   create_params.initially_hidden = initially_hidden;
+   create_params.desired_renderer_state =
+       WebContents::CreateParams::kNoRendererProcess;
+@@ -82,6 +98,7 @@ std::unique_ptr<WebContents> CreateResto
+                                             session_storage_namespace_map);
+   apps::SetAppIdForWebContents(browser->GetProfile(), web_contents.get(),
+                                extension_app_id);
++  containers::OnTabContentsCreated(web_contents.get());
+ 
+   glic::RestoreGlicStateFromExtraData(web_contents.get(), extra_data);
+   send_tab_to_self::SendTabToSelfActivationTracker::RestoreFromExtraData(
+--- a/components/containers/content/browser/storage_partition_utils.h
++++ b/components/containers/content/browser/storage_partition_utils.h
+@@ -18,6 +18,10 @@ class WebContents;
+ 
+ namespace containers {
+ 
++// Key of a tab's container id in the extra data that session restore and tab
++// restore save with each tab.
++inline constexpr char kContainerIdTabExtraDataKey[] = "containers.container_id";
++
+ // Returns the config of the StoragePartition that holds the site data of the
+ // container with `container_id`, which must be a valid container id.
+ content::StoragePartitionConfig GetStoragePartitionConfigForContainer(
+--- a/chrome/browser/containers/containers_tab_util.cc
++++ b/chrome/browser/containers/containers_tab_util.cc
+@@ -80,6 +80,13 @@ GetContainerStoragePartitionToInherit(co
+   return partition->GetConfig();
+ }
+ 
++bool CanRestoreTab(Profile* profile,
++                   const std::map<std::string, std::string>& extra_data) {
++  auto it = extra_data.find(kContainerIdTabExtraDataKey);
++  return it == extra_data.end() ||
++         FindContainerStoragePartition(profile, it->second).has_value();
++}
++
+ void OnTabContentsCreated(content::WebContents* contents) {
+   if (!base::FeatureList::IsEnabled(features::kHeliumContainers)) {
+     return;
+--- a/chrome/browser/containers/containers_tab_util.h
++++ b/chrome/browser/containers/containers_tab_util.h
+@@ -5,7 +5,9 @@
+ #ifndef CHROME_BROWSER_CONTAINERS_CONTAINERS_TAB_UTIL_H_
+ #define CHROME_BROWSER_CONTAINERS_CONTAINERS_TAB_UTIL_H_
+ 
++#include <map>
+ #include <optional>
++#include <string>
+ #include <string_view>
+ 
+ #include "content/public/browser/storage_partition_config.h"
+@@ -46,6 +48,12 @@ GetStoragePartitionConfigForCommandLine(
+ std::optional<content::StoragePartitionConfig>
+ GetContainerStoragePartitionToInherit(content::SiteInstance* source);
+ 
++// Returns whether a tab saved with `extra_data` may be restored. It may not
++// if it belonged to a container that was deleted, or to any container while
++// containers are off, so that its sites never load outside their container.
++bool CanRestoreTab(Profile* profile,
++                   const std::map<std::string, std::string>& extra_data);
++
+ // Must be called for every WebContents created for a new tab. If it belongs
+ // to a container, remembers the container on the tab and records the
+ // container as used.
+--- a/chrome/browser/sessions/session_restore.cc
++++ b/chrome/browser/sessions/session_restore.cc
+@@ -40,6 +40,7 @@
+ #include "build/build_config.h"
+ #include "chrome/browser/after_startup_task_utils.h"
+ #include "chrome/browser/browser_process.h"
++#include "chrome/browser/containers/containers_tab_util.h"
+ #include "chrome/browser/buildflags.h"
+ #include "chrome/browser/prefs/session_startup_pref.h"
+ #include "chrome/browser/profiles/keep_alive/profile_keep_alive_types.h"
+@@ -746,6 +747,26 @@ class SessionRestoreImpl : public Browse
+         });
+     windows->erase(to_remove.begin(), to_remove.end());
+ #endif  // BUIDLFLAG(IS_CHROMEOS)
++
++    // Tabs of a container that was deleted, or of any container while
++    // containers are off, aren't restored.
++    for (const std::unique_ptr<sessions::SessionWindow>& window : *windows) {
++      int selected_tab_index = window->selected_tab_index;
++      for (int i = static_cast<int>(window->tabs.size()) - 1; i >= 0; --i) {
++        if (containers::CanRestoreTab(profile_, window->tabs[i]->extra_data)) {
++          continue;
++        }
++        window->tabs.erase(window->tabs.begin() + i);
++        if (i < selected_tab_index) {
++          --selected_tab_index;
++        }
++      }
++      window->selected_tab_index = selected_tab_index;
++    }
++    std::erase_if(*windows,
++                  [](const std::unique_ptr<sessions::SessionWindow>& window) {
++                    return window->tabs.empty();
++                  });
+   }
+ 
+   // Creates browsers for `windows` and returns the last tabbed browser or the

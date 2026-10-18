@@ -1,3 +1,24 @@
 # Ophelia patches, applied after Helium core and the platform patches.
 # One path per line, relative to this directory, e.g.
 # ophelia/branding/rename-browser.patch
+ophelia/containers/add-containers-flag.patch
+ophelia/containers/add-containers-service.patch
+ophelia/containers/add-containers-web-contents-utils.patch
+ophelia/containers/open-tabs-in-containers.patch
+ophelia/containers/keep-container-data-on-storage-cleanup.patch
+ophelia/containers/keep-links-in-container.patch
+ophelia/containers/share-permissions-with-profile.patch
+ophelia/containers/add-container-tab-indicator.patch
+ophelia/containers/open-links-in-container.patch
+ophelia/containers/open-tabs-in-container-menu.patch
+ophelia/containers/add-containers-settings-page.patch
+ophelia/containers/restore-tabs-in-container.patch
+ophelia/containers/separate-noise-per-container.patch
+ophelia/containers/follow-default-zoom-in-containers.patch
+ophelia/containers/delete-container-tabs-and-data.patch
+ophelia/containers/clear-browsing-data-in-containers.patch
+ophelia/containers/keep-session-cookies-in-containers.patch
+ophelia/containers/repaint-container-tabs-on-edit.patch
+ophelia/containers/route-notifications-to-their-partition.patch
+ophelia/containers/restore-session-storage-in-containers.patch
+ophelia/containers/keep-containers-in-saved-tab-groups.patch

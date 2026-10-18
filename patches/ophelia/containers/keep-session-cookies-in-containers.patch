@@ -1,0 +1,83 @@
+--- a/chrome/browser/net/BUILD.gn
++++ b/chrome/browser/net/BUILD.gn
+@@ -187,6 +187,7 @@ source_set("impl") {
+     "//chrome/browser/webid",
+     "//chrome/common:version_header",
+     "//components/certificate_transparency",
++    "//components/containers/content/browser",
+     "//components/content_settings/core/common",
+     "//components/contextual_tasks/public:feature_list",
+     "//components/country_codes",
+--- a/chrome/browser/net/profile_network_context_service.cc
++++ b/chrome/browser/net/profile_network_context_service.cc
+@@ -55,6 +55,7 @@
+ #include "chrome/common/pref_names.h"
+ #include "chrome/common/webui_url_constants.h"
+ #include "components/certificate_transparency/pref_names.h"
++#include "components/containers/content/browser/storage_partition_utils.h"
+ #include "components/content_settings/core/browser/cookie_settings.h"
+ #include "components/content_settings/core/browser/host_content_settings_map.h"
+ #include "components/content_settings/core/common/content_settings.h"
+@@ -1448,7 +1449,10 @@ void ProfileNetworkContextService::Confi
+         base::FilePath(chrome::kReportingAndNelStoreFilename);
+ #endif  // BUILDFLAG(ENABLE_REPORTING)
+ 
+-    if (relative_partition_path.empty()) {  // This is the main partition.
++    // Containers keep session cookies across restarts like the main
++    // partition, so their tabs stay signed in the same way.
++    if (relative_partition_path.empty() ||  // This is the main partition.
++        containers::IsContainerStoragePartitionPath(relative_partition_path)) {
+       network_context_params->restore_old_session_cookies =
+           profile_->ShouldRestoreOldSessionCookies();
+       network_context_params->persist_session_cookies =
+--- a/components/containers/content/browser/storage_partition_utils.cc
++++ b/components/containers/content/browser/storage_partition_utils.cc
+@@ -5,6 +5,7 @@
+ #include "components/containers/content/browser/storage_partition_utils.h"
+ 
+ #include "base/check.h"
++#include "base/files/file_path.h"
+ #include "components/containers/core/common/container_id.h"
+ #include "content/public/browser/browser_context.h"
+ #include "content/public/browser/storage_partition.h"
+@@ -49,6 +50,14 @@ content::StoragePartitionConfig GetStora
+       /*in_memory=*/false);
+ }
+ 
++bool IsContainerStoragePartitionPath(
++    const base::FilePath& relative_partition_path) {
++  // Content keeps the StoragePartitions of a partition domain together in a
++  // directory named after the domain: Storage/ext/<domain>/<hashed name>.
++  return relative_partition_path.DirName().BaseName() ==
++         base::FilePath::FromASCII(kContainersStoragePartitionDomain);
++}
++
+ std::optional<std::string> GetContainerIdFromStoragePartitionConfig(
+     const content::StoragePartitionConfig& config) {
+   if (config.partition_domain() != kContainersStoragePartitionDomain ||
+--- a/components/containers/content/browser/storage_partition_utils.h
++++ b/components/containers/content/browser/storage_partition_utils.h
+@@ -11,6 +11,10 @@
+ 
+ #include "content/public/browser/storage_partition_config.h"
+ 
++namespace base {
++class FilePath;
++}  // namespace base
++
+ namespace content {
+ class BrowserContext;
+ class WebContents;
+@@ -28,6 +32,12 @@ content::StoragePartitionConfig GetStora
+     content::BrowserContext* browser_context,
+     std::string_view container_id);
+ 
++// Returns whether `relative_partition_path`, a StoragePartition's path
++// relative to its profile, is the StoragePartition of a container. For code
++// that only gets the path, like the setup of a partition's NetworkContext.
++bool IsContainerStoragePartitionPath(
++    const base::FilePath& relative_partition_path);
++
+ // Returns the container id if `config` belongs to a container.
+ std::optional<std::string> GetContainerIdFromStoragePartitionConfig(
+     const content::StoragePartitionConfig& config);

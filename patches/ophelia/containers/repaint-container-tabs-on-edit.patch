@@ -1,0 +1,161 @@
+--- a/chrome/browser/ui/views/tabs/BUILD.gn
++++ b/chrome/browser/ui/views/tabs/BUILD.gn
+@@ -139,10 +139,13 @@ source_set("container_indicator") {
+     ":tab_style_views",
+     "//base:i18n",
+     "//chrome/browser/containers",
++    "//chrome/browser/profiles:profile",
+     "//chrome/browser/ui/tabs",
+     "//chrome/browser/ui/tabs:tab_group",
+     "//chrome/browser/ui/views/tabs/shared",
++    "//components/containers/core/browser",
+     "//components/tabs:public",
++    "//content/public/browser",
+     "//skia",
+     "//ui/color",
+     "//ui/gfx",
+--- a/chrome/browser/ui/views/tabs/common/tab_view.cc
++++ b/chrome/browser/ui/views/tabs/common/tab_view.cc
+@@ -797,6 +797,7 @@ void TabView::OnPaint(gfx::Canvas* canva
+   }
+ 
+   tab_styling()->PaintTab(canvas);
++  container_indicator_repainter_.ObserveContainersOf(GetTabInterface());
+   PaintContainerIndicator(canvas, *this, *tab_styling(), GetTabInterface(),
+                           orientation_);
+ 
+--- a/chrome/browser/ui/views/tabs/common/tab_view.h
++++ b/chrome/browser/ui/views/tabs/common/tab_view.h
+@@ -16,6 +16,7 @@
+ #include "chrome/browser/ui/tabs/tab_style.h"
+ #include "chrome/browser/ui/tabs/vertical_tab_strip_state_controller.h"
+ #include "chrome/browser/ui/views/tabs/hovercard/hover_card_anchor_target.h"
++#include "chrome/browser/ui/views/tabs/container_indicator.h"
+ #include "chrome/browser/ui/views/tabs/shared/tab_strip_types.h"
+ #include "chrome/browser/ui/views/tabs/tab/alert_indicator_button.h"
+ #include "chrome/browser/ui/views/tabs/tab/tab_context_menu_controller.h"
+@@ -262,6 +263,8 @@ class TabView : public views::View,
+ 
+   std::unique_ptr<tabs::TabDataObserver> tab_data_observer_;
+ 
++  ContainerIndicatorRepainter container_indicator_repainter_{this};
++
+   base::ScopedObservation<views::View, views::ViewObserver>
+       close_button_observation_{this};
+ 
+--- a/chrome/browser/ui/views/tabs/container_indicator.cc
++++ b/chrome/browser/ui/views/tabs/container_indicator.cc
+@@ -8,11 +8,14 @@
+ 
+ #include "base/i18n/rtl.h"
+ #include "chrome/browser/containers/container_color.h"
++#include "chrome/browser/containers/containers_service_factory.h"
++#include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/ui/tabs/tab_group_theme.h"
+ #include "chrome/browser/ui/tabs/tab_style.h"
+ #include "chrome/browser/ui/views/tabs/shared/tab_strip_types.h"
+ #include "chrome/browser/ui/views/tabs/tab_style_views.h"
+ #include "components/tabs/public/tab_interface.h"
++#include "content/public/browser/web_contents.h"
+ #include "third_party/skia/include/core/SkPath.h"
+ #include "ui/color/color_provider.h"
+ #include "ui/gfx/canvas.h"
+@@ -66,3 +69,25 @@ void PaintContainerIndicator(gfx::Canvas
+                                  containers::GetTabGroupColorId(*color),
+                                  tab_view.GetWidget()->ShouldPaintAsActive())));
+ }
++
++ContainerIndicatorRepainter::ContainerIndicatorRepainter(views::View* tab_view)
++    : tab_view_(tab_view) {}
++
++ContainerIndicatorRepainter::~ContainerIndicatorRepainter() = default;
++
++void ContainerIndicatorRepainter::ObserveContainersOf(
++    const tabs::TabInterface* tab) {
++  if (observation_.IsObserving() || !tab || !tab->GetContents()) {
++    return;
++  }
++  if (containers::ContainersService* service =
++          containers::ContainersServiceFactory::GetForProfile(
++              Profile::FromBrowserContext(
++                  tab->GetContents()->GetBrowserContext()))) {
++    observation_.Observe(service);
++  }
++}
++
++void ContainerIndicatorRepainter::OnContainersChanged() {
++  tab_view_->SchedulePaint();
++}
+--- a/chrome/browser/ui/views/tabs/container_indicator.h
++++ b/chrome/browser/ui/views/tabs/container_indicator.h
+@@ -5,6 +5,10 @@
+ #ifndef CHROME_BROWSER_UI_VIEWS_TABS_CONTAINER_INDICATOR_H_
+ #define CHROME_BROWSER_UI_VIEWS_TABS_CONTAINER_INDICATOR_H_
+ 
++#include "base/memory/raw_ptr.h"
++#include "base/scoped_observation.h"
++#include "components/containers/core/browser/containers_service.h"
++
+ class TabStyleViews;
+ enum class TabStripOrientation;
+ 
+@@ -30,4 +34,30 @@ void PaintContainerIndicator(gfx::Canvas
+                              const tabs::TabInterface* tab,
+                              TabStripOrientation orientation);
+ 
++// Repaints a tab view when the containers of its profile change, so that its
++// container indicator shows a recoloured container right away. The view
++// otherwise only repaints when its own tab changes.
++class ContainerIndicatorRepainter
++    : public containers::ContainersService::Observer {
++ public:
++  explicit ContainerIndicatorRepainter(views::View* tab_view);
++  ContainerIndicatorRepainter(const ContainerIndicatorRepainter&) = delete;
++  ContainerIndicatorRepainter& operator=(const ContainerIndicatorRepainter&) =
++      delete;
++  ~ContainerIndicatorRepainter() override;
++
++  // Starts observing the containers of `tab`'s profile, if it doesn't yet.
++  // Call it when painting the tab view.
++  void ObserveContainersOf(const tabs::TabInterface* tab);
++
++  // containers::ContainersService::Observer:
++  void OnContainersChanged() override;
++
++ private:
++  const raw_ptr<views::View> tab_view_;
++  base::ScopedObservation<containers::ContainersService,
++                          containers::ContainersService::Observer>
++      observation_{this};
++};
++
+ #endif  // CHROME_BROWSER_UI_VIEWS_TABS_CONTAINER_INDICATOR_H_
+--- a/chrome/browser/ui/views/tabs/tab.cc
++++ b/chrome/browser/ui/views/tabs/tab.cc
+@@ -904,6 +904,7 @@ void Tab::PaintChildren(const views::Pai
+ 
+ void Tab::OnPaint(gfx::Canvas* canvas) {
+   tab_style_views()->PaintTab(canvas);
++  container_indicator_repainter_.ObserveContainersOf(tab_handle_.Get());
+   PaintContainerIndicator(canvas, *this, *tab_style_views(), tab_handle_.Get(),
+                           TabStripOrientation::kHorizontal);
+ }
+--- a/chrome/browser/ui/views/tabs/tab.h
++++ b/chrome/browser/ui/views/tabs/tab.h
+@@ -14,6 +14,7 @@
+ #include "chrome/browser/ui/tabs/tab_data.h"
+ #include "chrome/browser/ui/tabs/tab_enums.h"
+ #include "chrome/browser/ui/views/tabs/hovercard/hover_card_anchor_target.h"
++#include "chrome/browser/ui/views/tabs/container_indicator.h"
+ #include "chrome/browser/ui/views/tabs/shared/tab_strip_types.h"
+ #include "chrome/browser/ui/views/tabs/tab/alert_indicator_button.h"
+ #include "chrome/browser/ui/views/tabs/tab_slot_view.h"
+@@ -307,6 +308,8 @@ class Tab : public gfx::AnimationDelegat
+ 
+   std::unique_ptr<TabStyleViews> tab_style_views_;
+ 
++  ContainerIndicatorRepainter container_indicator_repainter_{this};
++
+   std::unique_ptr<GlowHoverController> hover_controller_;
+ 
+   // True if the tab is being animated closed.

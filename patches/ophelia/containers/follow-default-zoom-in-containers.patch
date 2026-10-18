@@ -1,0 +1,82 @@
+--- a/chrome/browser/ui/zoom/chrome_zoom_level_prefs.cc
++++ b/chrome/browser/ui/zoom/chrome_zoom_level_prefs.cc
+@@ -7,6 +7,7 @@
+ #include <stddef.h>
+ 
+ #include <memory>
++#include <optional>
+ 
+ #include "base/containers/span.h"
+ #include "base/feature_list.h"
+@@ -73,6 +74,7 @@ ChromeZoomLevelPrefs::ChromeZoomLevelPre
+   base::FilePath partition_relative_path;
+   profile_path.AppendRelativePath(partition_path, &partition_relative_path);
+   partition_key_ = GetPartitionKey(partition_relative_path);
++  profile_partition_key_ = GetPartitionKey(base::FilePath());
+ }
+ 
+ ChromeZoomLevelPrefs::~ChromeZoomLevelPrefs() = default;
+@@ -98,10 +100,26 @@ void ChromeZoomLevelPrefs::SetDefaultZoo
+   }
+ }
+ 
++void ChromeZoomLevelPrefs::OnDefaultZoomLevelPrefChanged() {
++  const double level = GetDefaultZoomLevelPref();
++  if (blink::ZoomValuesEqual(level, host_zoom_map_->GetDefaultZoomLevel())) {
++    return;
++  }
++  host_zoom_map_->SetDefaultZoomLevel(level);
++  default_zoom_changed_callbacks_.Notify();
++}
++
+ double ChromeZoomLevelPrefs::GetDefaultZoomLevelPref() const {
+   const base::DictValue& default_zoom_level_dictionary =
+       pref_service_->GetDict(prefs::kPartitionDefaultZoomLevel);
+-  return default_zoom_level_dictionary.FindDouble(partition_key_).value_or(0.0);
++  // Partitions without a default zoom level of their own, like containers,
++  // follow the profile's.
++  if (std::optional<double> level =
++          default_zoom_level_dictionary.FindDouble(partition_key_)) {
++    return *level;
++  }
++  return default_zoom_level_dictionary.FindDouble(profile_partition_key_)
++      .value_or(0.0);
+ }
+ 
+ double ChromeZoomLevelPrefs::GetDefaultZoomFactor() const {
+@@ -243,6 +261,15 @@ void ChromeZoomLevelPrefs::InitHostZoomM
+       host_zoom_map_->AddZoomLevelChangedCallback(base::BindRepeating(
+           &ChromeZoomLevelPrefs::OnZoomLevelChanged, base::Unretained(this)));
+ 
++  if (partition_key_ != profile_partition_key_) {
++    pref_change_registrar_.Init(pref_service_);
++    pref_change_registrar_.Add(
++        prefs::kPartitionDefaultZoomLevel,
++        base::BindRepeating(
++            &ChromeZoomLevelPrefs::OnDefaultZoomLevelPrefChanged,
++            base::Unretained(this)));
++  }
++
+ // On Android, the default zoom level is controlled by the Java-side UI and not
+ // the settings flow as it is with other platforms. For Android, we will pass an
+ // extra callback to the HostZoomMapImpl for setting the default zoom Pref when
+--- a/chrome/browser/ui/zoom/chrome_zoom_level_prefs.h
++++ b/chrome/browser/ui/zoom/chrome_zoom_level_prefs.h
+@@ -66,11 +66,17 @@ class ChromeZoomLevelPrefs : public cont
+   // zoom levels (if any) managed by this class (for its associated partition).
+   void OnZoomLevelChanged(const content::HostZoomMap::ZoomLevelChange& change);
+ 
++  // Applies the profile's default zoom level to this partition when that
++  // changes, if this partition has none of its own.
++  void OnDefaultZoomLevelPrefChanged();
++
+   raw_ptr<PrefService> pref_service_;
+   base::WeakPtr<zoom::ZoomEventManager> zoom_event_manager_;
+   raw_ptr<content::HostZoomMap> host_zoom_map_;
+   base::CallbackListSubscription zoom_subscription_;
+   std::string partition_key_;
++  std::string profile_partition_key_;
++  PrefChangeRegistrar pref_change_registrar_;
+   base::RepeatingClosureList default_zoom_changed_callbacks_;
+ };
+ 

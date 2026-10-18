@@ -1,0 +1,413 @@
+--- a/chrome/app/settings_strings.grdp
++++ b/chrome/app/settings_strings.grdp
+@@ -2320,6 +2320,15 @@
+     <message name="IDS_SETTINGS_CONTAINERS_COLOR" desc="Label of the color choices for a container.">
+       Color
+     </message>
++    <message name="IDS_SETTINGS_CONTAINERS_REMOVE_TITLE" desc="Title of the dialog that confirms deleting a container. $1 is the container's name.">
++      Delete <ph name="CONTAINER_NAME">$1<ex>Work</ex></ph>?
++    </message>
++    <message name="IDS_SETTINGS_CONTAINERS_REMOVE_MESSAGE" desc="Body of the dialog that confirms deleting a container. COUNT is the number of tabs open in the container, which will be closed.">
++      {COUNT, plural,
++        =0 {Its cookies and site data will be deleted.}
++        =1 {Its open tab will close, and its cookies and site data will be deleted.}
++        other {Its # open tabs will close, and its cookies and site data will be deleted.}}
++    </message>
+     <message name="IDS_SETTINGS_PROFILES_AND_CONTAINERS" desc="Name of the settings page for profiles when it also has a section for containers.">
+       Profiles and Containers
+     </message>
+--- a/chrome/browser/containers/BUILD.gn
++++ b/chrome/browser/containers/BUILD.gn
+@@ -24,11 +24,13 @@ source_set("containers") {
+   deps = [
+     "//base",
+     "//chrome/app:generated_resources",
++    "//chrome/common:constants",
+     "//components/containers/content/browser",
+     "//components/containers/core/browser",
+     "//components/containers/core/common",
+     "//components/keyed_service/core",
+     "//components/prefs",
++    "//services/network/public/mojom",
+     "//ui/base",
+   ]
+ }
+--- a/chrome/browser/containers/container_data.cc
++++ b/chrome/browser/containers/container_data.cc
+@@ -4,14 +4,45 @@
+ 
+ #include "chrome/browser/containers/container_data.h"
+ 
++#include "base/functional/callback_helpers.h"
++#include "base/time/time.h"
+ #include "chrome/browser/profiles/profile.h"
++#include "chrome/common/pref_names.h"
+ #include "components/containers/content/browser/storage_partition_utils.h"
+ #include "components/containers/core/browser/prefs.h"
+ #include "components/prefs/pref_service.h"
++#include "content/public/browser/host_zoom_map.h"
+ #include "content/public/browser/storage_partition.h"
++#include "services/network/public/mojom/clear_data_filter.mojom.h"
++#include "services/network/public/mojom/cookie_manager.mojom.h"
++#include "services/network/public/mojom/network_context.mojom.h"
+ 
+ namespace containers {
+ 
++void DeleteContainerData(Profile* profile, std::string_view container_id) {
++  content::StoragePartition* partition = profile->GetStoragePartition(
++      GetStoragePartitionConfigForContainer(profile, container_id));
++
++  partition->ClearData(content::StoragePartition::REMOVE_DATA_MASK_ALL,
++                       /*filter_builder=*/nullptr,
++                       /*storage_key_policy_matcher=*/base::NullCallback(),
++                       network::mojom::CookieDeletionFilter::New(),
++                       /*perform_storage_cleanup=*/true, base::Time(),
++                       base::Time::Max(), base::DoNothing());
++  partition->GetNetworkContext()->ClearHttpCache(
++      base::Time(), base::Time::Max(), /*filter=*/nullptr, base::DoNothing());
++
++  // Removing a zoom level also removes it from the profile's prefs.
++  content::HostZoomMap::GetForStoragePartition(partition)->ClearZoomLevels(
++      base::Time(), base::Time::Max());
++
++  // The partition is loaded now, so its directory can only go once the
++  // browser restarts: StoragePartition garbage collection then deletes every
++  // directory that no container, app or extension still uses.
++  profile->GetPrefs()->SetBoolean(
++      ::prefs::kShouldGarbageCollectStoragePartitions, true);
++}
++
+ std::unordered_set<base::FilePath> GetContainerStoragePartitionPaths(
+     Profile* profile) {
+   std::unordered_set<base::FilePath> paths;
+--- a/chrome/browser/containers/container_data.h
++++ b/chrome/browser/containers/container_data.h
+@@ -5,6 +5,7 @@
+ #ifndef CHROME_BROWSER_CONTAINERS_CONTAINER_DATA_H_
+ #define CHROME_BROWSER_CONTAINERS_CONTAINER_DATA_H_
+ 
++#include <string_view>
+ #include <unordered_set>
+ 
+ #include "base/files/file_path.h"
+@@ -13,6 +14,12 @@ class Profile;
+ 
+ namespace containers {
+ 
++// Deletes the site data of the container with `container_id` in `profile`:
++// cookies, site storage, HTTP cache and zoom levels are cleared now, and its
++// StoragePartition directory is deleted at the next startup. Call this after
++// the container's tabs are closed and the container is removed.
++void DeleteContainerData(Profile* profile, std::string_view container_id);
++
+ // Returns the StoragePartition paths of `profile`'s containers, which
+ // StoragePartition garbage collection must keep.
+ std::unordered_set<base::FilePath> GetContainerStoragePartitionPaths(
+--- a/chrome/browser/resources/settings/people_page/containers_browser_proxy.ts
++++ b/chrome/browser/resources/settings/people_page/containers_browser_proxy.ts
+@@ -26,6 +26,9 @@ export interface ContainersBrowserProxy
+   getContainersInfo(): Promise<ContainersInfo>;
+   addContainer(name: string, color: number): void;
+   updateContainer(id: string, name: string, color: number): void;
++  // Returns the text that confirms deleting the container with `id`, which
++  // says how many of its tabs will close.
++  getRemoveContainerMessage(id: string): Promise<string>;
+   removeContainer(id: string): void;
+   moveContainer(id: string, newIndex: number): void;
+ }
+@@ -43,6 +46,10 @@ export class ContainersBrowserProxyImpl
+     chrome.send('updateContainer', [id, name, color]);
+   }
+ 
++  getRemoveContainerMessage(id: string): Promise<string> {
++    return sendWithPromise('getRemoveContainerMessage', id);
++  }
++
+   removeContainer(id: string) {
+     chrome.send('removeContainer', [id]);
+   }
+--- a/chrome/browser/resources/settings/people_page/containers_section.html
++++ b/chrome/browser/resources/settings/people_page/containers_section.html
+@@ -118,3 +118,20 @@
+     </div>
+   </cr-dialog>
+ </template>
++
++<template is="dom-if" if="[[showRemoveDialog_]]" restamp>
++  <cr-dialog id="removeDialog" show-on-attach
++      on-close="onRemoveDialogClose_">
++    <div slot="title">[[removeTitle_]]</div>
++    <div slot="body">[[removeMessage_]]</div>
++    <div slot="button-container">
++      <cr-button class="cancel-button" on-click="onRemoveDialogCancel_">
++        $i18n{cancel}
++      </cr-button>
++      <cr-button id="removeButton" class="action-button"
++          on-click="onRemoveDialogConfirm_">
++        $i18n{delete}
++      </cr-button>
++    </div>
++  </cr-dialog>
++</template>
+--- a/chrome/browser/resources/settings/people_page/containers_section.ts
++++ b/chrome/browser/resources/settings/people_page/containers_section.ts
+@@ -54,6 +54,14 @@ export class SettingsContainersSectionEl
+       dialogTitle_: String,
+       dialogName_: String,
+       dialogColor_: Number,
++
++      showRemoveDialog_: {
++        type: Boolean,
++        value: false,
++      },
++
++      removeTitle_: String,
++      removeMessage_: String,
+     };
+   }
+ 
+@@ -63,6 +71,9 @@ export class SettingsContainersSectionEl
+   declare private dialogTitle_: string;
+   declare private dialogName_: string;
+   declare private dialogColor_: number;
++  declare private showRemoveDialog_: boolean;
++  declare private removeTitle_: string;
++  declare private removeMessage_: string;
+ 
+   private browserProxy_: ContainersBrowserProxy =
+       ContainersBrowserProxyImpl.getInstance();
+@@ -70,6 +81,9 @@ export class SettingsContainersSectionEl
+   // Container the edit dialog is for. Null while adding a container.
+   private activeContainer_: Container|null = null;
+ 
++  // Container the delete dialog is for.
++  private containerToRemove_: Container|null = null;
++
+   override connectedCallback() {
+     super.connectedCallback();
+ 
+@@ -148,8 +162,34 @@ export class SettingsContainersSectionEl
+     this.browserProxy_.moveContainer(e.model.item.id, e.model.index + 1);
+   }
+ 
+-  private onRemoveClick_(e: DomRepeatEvent<Container>) {
+-    this.browserProxy_.removeContainer(e.model.item.id);
++  private async onRemoveClick_(e: DomRepeatEvent<Container>) {
++    const container = e.model.item;
++    this.containerToRemove_ = container;
++    this.removeTitle_ =
++        loadTimeData.getStringF('containersRemoveTitle', container.name);
++    this.removeMessage_ =
++        await this.browserProxy_.getRemoveContainerMessage(container.id);
++    this.showRemoveDialog_ = true;
++  }
++
++  private getRemoveDialog_(): CrDialogElement {
++    return this.shadowRoot!.querySelector<CrDialogElement>('#removeDialog')!;
++  }
++
++  private onRemoveDialogCancel_() {
++    this.getRemoveDialog_().cancel();
++  }
++
++  private onRemoveDialogConfirm_() {
++    if (this.containerToRemove_) {
++      this.browserProxy_.removeContainer(this.containerToRemove_.id);
++    }
++    this.getRemoveDialog_().close();
++  }
++
++  private onRemoveDialogClose_() {
++    this.showRemoveDialog_ = false;
++    this.containerToRemove_ = null;
+   }
+ 
+   private onColorClick_(e: DomRepeatEvent<ContainerColor>) {
+--- a/chrome/browser/ui/webui/settings/BUILD.gn
++++ b/chrome/browser/ui/webui/settings/BUILD.gn
+@@ -276,6 +276,7 @@ source_set("impl") {
+     "//chrome/browser/ui:managed_ui",
+     "//chrome/browser/ui:ui_features",
+     "//chrome/browser/ui:url_identity",
++    "//chrome/browser/ui/browser_window",
+     "//chrome/browser/ui/desktop_to_mobile_promos:service",
+     "//chrome/browser/ui/hats",
+     "//chrome/browser/ui/interaction",
+@@ -319,6 +320,7 @@ source_set("impl") {
+     "//components/browsing_data/content",
+     "//components/browsing_data/core",
+     "//components/browsing_data/core:cookie_or_cache_deletion_choice",
++    "//components/containers/content/browser",
+     "//components/content_settings/core/browser",
+     "//components/custom_handlers",
+     "//components/desktop_to_mobile_promos",
+@@ -343,6 +345,7 @@ source_set("impl") {
+     "//components/strings:components_strings",
+     "//components/sync/service",
+     "//components/tab_groups",
++    "//components/tabs:public",
+     "//components/universal_optout",
+     "//components/user_manager:common",
+     "//components/wallet/core/browser",
+--- a/chrome/browser/ui/webui/settings/containers_handler.cc
++++ b/chrome/browser/ui/webui/settings/containers_handler.cc
+@@ -6,14 +6,25 @@
+ 
+ #include <optional>
+ #include <string>
++#include <string_view>
+ #include <tuple>
++#include <vector>
+ 
+ #include "base/functional/bind.h"
+ #include "chrome/browser/containers/container_color.h"
++#include "chrome/browser/containers/container_data.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/browser_window/public/profile_browser_collection.h"
+ #include "chrome/browser/ui/tabs/tab_group_theme.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
++#include "chrome/grit/generated_resources.h"
++#include "components/containers/content/browser/storage_partition_utils.h"
+ #include "components/tab_groups/tab_group_color.h"
++#include "components/tabs/public/tab_interface.h"
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/browser/web_ui.h"
++#include "ui/base/l10n/l10n_util.h"
+ #include "ui/color/color_provider.h"
+ #include "ui/gfx/color_utils.h"
+ 
+@@ -43,10 +54,30 @@ std::optional<containers::mojom::Color>
+   return color;
+ }
+ 
++// Returns the open tabs of the container with `container_id`, in all of
++// `profile`'s windows.
++std::vector<tabs::TabInterface*> GetContainerTabs(
++    Profile* profile,
++    std::string_view container_id) {
++  std::vector<tabs::TabInterface*> tabs;
++  ProfileBrowserCollection::GetForProfile(profile)->ForEach(
++      [&](BrowserWindowInterface* browser) {
++        for (tabs::TabInterface* tab : *browser->GetTabStripModel()) {
++          if (containers::GetContainerIdForWebContents(tab->GetContents()) ==
++              container_id) {
++            tabs.push_back(tab);
++          }
++        }
++        return true;
++      });
++  return tabs;
++}
++
+ }  // namespace
+ 
+-ContainersHandler::ContainersHandler(containers::ContainersService* service)
+-    : service_(service) {}
++ContainersHandler::ContainersHandler(Profile* profile,
++                                     containers::ContainersService* service)
++    : profile_(profile), service_(service) {}
+ 
+ ContainersHandler::~ContainersHandler() = default;
+ 
+@@ -63,6 +94,10 @@ void ContainersHandler::RegisterMessages
+       base::BindRepeating(&ContainersHandler::HandleUpdateContainer,
+                           base::Unretained(this)));
+   web_ui()->RegisterMessageCallback(
++      "getRemoveContainerMessage",
++      base::BindRepeating(&ContainersHandler::HandleGetRemoveContainerMessage,
++                          base::Unretained(this)));
++  web_ui()->RegisterMessageCallback(
+       "removeContainer",
+       base::BindRepeating(&ContainersHandler::HandleRemoveContainer,
+                           base::Unretained(this)));
+@@ -112,10 +147,31 @@ void ContainersHandler::HandleUpdateCont
+   }
+ }
+ 
++void ContainersHandler::HandleGetRemoveContainerMessage(
++    const base::ListValue& args) {
++  AllowJavascript();
++  const std::string* id = args[1].GetIfString();
++  const int tab_count =
++      id ? static_cast<int>(GetContainerTabs(profile_, *id).size()) : 0;
++  ResolveJavascriptCallback(
++      args[0], base::Value(l10n_util::GetPluralStringFUTF16(
++                   IDS_SETTINGS_CONTAINERS_REMOVE_MESSAGE, tab_count)));
++}
++
+ void ContainersHandler::HandleRemoveContainer(const base::ListValue& args) {
+-  if (const std::string* id = args[0].GetIfString()) {
+-    service_->RemoveContainer(*id);
++  const std::string* id = args[0].GetIfString();
++  if (!id || !service_->GetContainer(*id)) {
++    return;
++  }
++  // Close the tabs first, so that nothing uses the site data being deleted.
++  for (tabs::TabInterface* tab : GetContainerTabs(profile_, *id)) {
++    tab->Close();
+   }
++  service_->RemoveContainer(*id);
++  // Nothing is left to attribute to the container: its tabs are closed, can't
++  // be restored, and its data is deleted.
++  service_->ForgetUsedContainer(*id);
++  containers::DeleteContainerData(profile_, *id);
+ }
+ 
+ void ContainersHandler::HandleMoveContainer(const base::ListValue& args) {
+--- a/chrome/browser/ui/webui/settings/containers_handler.h
++++ b/chrome/browser/ui/webui/settings/containers_handler.h
+@@ -11,6 +11,8 @@
+ #include "chrome/browser/ui/webui/settings/settings_page_ui_handler.h"
+ #include "components/containers/core/browser/containers_service.h"
+ 
++class Profile;
++
+ namespace settings {
+ 
+ // Handles the containers settings page: lists, adds, edits, removes and
+@@ -18,7 +20,7 @@ namespace settings {
+ class ContainersHandler : public SettingsPageUIHandler,
+                           public containers::ContainersService::Observer {
+  public:
+-  explicit ContainersHandler(containers::ContainersService* service);
++  ContainersHandler(Profile* profile, containers::ContainersService* service);
+   ContainersHandler(const ContainersHandler&) = delete;
+   ContainersHandler& operator=(const ContainersHandler&) = delete;
+   ~ContainersHandler() override;
+@@ -35,12 +37,14 @@ class ContainersHandler : public Setting
+   void HandleGetContainersInfo(const base::ListValue& args);
+   void HandleAddContainer(const base::ListValue& args);
+   void HandleUpdateContainer(const base::ListValue& args);
++  void HandleGetRemoveContainerMessage(const base::ListValue& args);
+   void HandleRemoveContainer(const base::ListValue& args);
+   void HandleMoveContainer(const base::ListValue& args);
+ 
+   base::ListValue GetContainersList() const;
+   base::ListValue GetColorsList();
+ 
++  raw_ptr<Profile> profile_;
+   raw_ptr<containers::ContainersService> service_;
+   base::ScopedObservation<containers::ContainersService,
+                           containers::ContainersService::Observer>
+--- a/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
++++ b/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
+@@ -2451,6 +2451,7 @@ void AddPeopleStrings(content::WebUIData
+       {"containersEditTitle", IDS_SETTINGS_CONTAINERS_EDIT_TITLE},
+       {"containersName", IDS_SETTINGS_CONTAINERS_NAME},
+       {"containersColor", IDS_SETTINGS_CONTAINERS_COLOR},
++      {"containersRemoveTitle", IDS_SETTINGS_CONTAINERS_REMOVE_TITLE},
+       {"syncSettingsSavedToast", IDS_SETTINGS_SYNC_SETTINGS_SAVED_TOAST_LABEL},
+       {"manageGoogleAccount", IDS_SETTINGS_MANAGE_GOOGLE_ACCOUNT},
+       {"syncAndNonPersonalizedServices",
+--- a/chrome/browser/ui/webui/settings/settings_ui.cc
++++ b/chrome/browser/ui/webui/settings/settings_ui.cc
+@@ -510,7 +510,7 @@ SettingsUI::SettingsUI(content::WebUI* w
+   if (containers::ContainersService* containers_service =
+           containers::ContainersServiceFactory::GetForProfile(profile)) {
+     AddSettingsPageUIHandler(
+-        std::make_unique<ContainersHandler>(containers_service));
++        std::make_unique<ContainersHandler>(profile, containers_service));
+   }
+ 
+   // Performance
