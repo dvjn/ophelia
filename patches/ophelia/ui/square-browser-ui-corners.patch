@@ -381,7 +381,7 @@
 +    return;
 +  }
 +  render_frame()->GetWebFrame()->GetDocument().InsertStyleSheet(
-+      blink::WebString::FromASCII(kSquareCornersStyleSheet), nullptr,
++      blink::WebString::FromAscii(kSquareCornersStyleSheet), nullptr,
 +      blink::WebCssOrigin::kUser);
 +}
 +
@@ -592,3 +592,34 @@
    ring_highlight_path->set_use_contents_bounds(true);
    views::FocusRing::Get(this)->SetPathGenerator(std::move(ring_highlight_path));
  
+--- a/chrome/browser/ui/views/location_bar/icon_label_bubble_view.cc
++++ b/chrome/browser/ui/views/location_bar/icon_label_bubble_view.cc
+@@ -44,6 +44,7 @@
+ #include "ui/views/controls/focus_ring.h"
+ #include "ui/views/controls/highlight_path_generator.h"
+ #include "ui/views/controls/image_view.h"
++#include "ui/views/layout/layout_provider.h"
+ #include "ui/views/style/platform_style.h"
+ #include "ui/views/widget/widget.h"
+ 
+@@ -592,7 +593,8 @@ gfx::RoundedCornersF IconLabelBubbleView
+   }
+ 
+   // location bar rounding is 8px and padding is 2px, so inner rounding is 6px
+-  return gfx::RoundedCornersF(6.0f);
++  return gfx::RoundedCornersF(
++      views::LayoutProvider::UseSquareCorners() ? 0.0f : 6.0f);
+ }
+ 
+ void IconLabelBubbleView::SetCornerRadii(const gfx::RoundedCornersF& radii) {
+--- a/chrome/browser/ui/views/omnibox/rounded_omnibox_results_frame.cc
++++ b/chrome/browser/ui/views/omnibox/rounded_omnibox_results_frame.cc
+@@ -235,7 +235,7 @@ RoundedOmniboxResultsFrame::RoundedOmnib
+     LocationBar* location_bar,
+     bool forward_mouse_events)
+     : contents_(contents), forward_mouse_events_(forward_mouse_events) {
+-  const int corner_radius = 12;
++  const int corner_radius = views::LayoutProvider::UseSquareCorners() ? 0 : 12;
+   auto* webui_content = GetOmniboxPopupWebUIBaseContent();
+   const bool masks_to_bounds =
+       webui_content && webui_content->ShouldSizeWebViewToPreferredHeight();
