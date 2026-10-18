@@ -1,0 +1,338 @@
+--- a/chrome/browser/ui/browser_actions.cc
++++ b/chrome/browser/ui/browser_actions.cc
+@@ -1052,6 +1052,9 @@ void BrowserActions::InitializeChromeMen
+           base::BindRepeating(
+               [](BrowserWindowInterface* bwi, actions::ActionItem* item,
+                  actions::ActionInvocationContext context) {
++                if (chrome::StartNewTabSearch(bwi)) {
++                  return;
++                }
+                 chrome::NewTab(bwi, NewTabTypes::kNewTabCommand);
+               },
+               bwi))
+--- a/chrome/browser/ui/browser_command_controller.cc
++++ b/chrome/browser/ui/browser_command_controller.cc
+@@ -771,6 +771,9 @@ void BrowserCommandController::HandleCom
+       CloseWindow(browser_);
+       break;
+     case IDC_NEW_TAB: {
++      if (StartNewTabSearch(browser_)) {
++        break;
++      }
+       NewTab(browser_, NewTabTypes::kNewTabCommand);
+       break;
+     }
+--- a/chrome/browser/ui/browser_commands.cc
++++ b/chrome/browser/ui/browser_commands.cc
+@@ -1287,6 +1287,7 @@ base::WeakPtr<content::NavigationHandle>
+   params.tabstrip_add_types =
+       AddTabTypes::ADD_FORCE_INDEX | AddTabTypes::ADD_INHERIT_OPENER;
+   // A new tab search opens its tab where the new tab would have gone.
++  base::RepeatingCallback<void(content::WebContents*)> on_new_tab_opened;
+   if (const std::optional<LocationBar::NewTabSearch> new_tab_search =
+           location_bar->new_tab_search();
+       new_tab_search &&
+@@ -1294,6 +1295,10 @@ base::WeakPtr<content::NavigationHandle>
+     params.tabstrip_index = new_tab_search->index;
+     params.group = new_tab_search->group;
+     params.tabstrip_add_types = AddTabTypes::ADD_ACTIVE;
++    if (new_tab_search->pinned) {
++      params.tabstrip_add_types |= AddTabTypes::ADD_PINNED;
++    }
++    on_new_tab_opened = new_tab_search->on_opened;
+     location_bar->set_new_tab_search(std::nullopt);
+   }
+   params.input_start =
+@@ -1304,6 +1309,9 @@ base::WeakPtr<content::NavigationHandle>
+       location_bar->navigation_params().url_typed_with_http_scheme;
+   params.extra_headers = location_bar->navigation_params().extra_headers;
+   auto result = Navigate(&params);
++  if (on_new_tab_opened && params.navigated_or_inserted_contents) {
++    on_new_tab_opened.Run(params.navigated_or_inserted_contents);
++  }
+ 
+ #if BUILDFLAG(ENABLE_EXTENSIONS)
+   Profile* profile = browser->GetProfile();
+@@ -1397,6 +1405,37 @@ void OpenSizeWindow(BrowserWindowInterfa
+ }
+ #endif  // BUILDFLAG(IS_WIN)
+ 
++bool StartNewTabSearch(
++    BrowserWindowInterface* browser,
++    int index,
++    std::optional<tab_groups::TabGroupId> group,
++    bool pinned,
++    base::RepeatingCallback<void(content::WebContents*)> on_opened) {
++  if (!browser->GetProfile()->GetPrefs()->GetBoolean(
++          prefs::kHeliumNewTabSearch) ||
++      !browser->GetTabStripModel()->GetActiveTab()) {
++    return false;
++  }
++  WindowFeatureController* window_features =
++      WindowFeatureController::From(browser);
++  if (!window_features->SupportsWindowFeature(
++          WindowFeatureController::WindowFeature::kFeatureTabStrip) ||
++      !window_features->SupportsWindowFeature(
++          WindowFeatureController::WindowFeature::kFeatureLocationBar)) {
++    return false;
++  }
++  BrowserWindow* window = BrowserWindow::FromBrowser(browser);
++  LocationBar* location_bar = window ? window->GetLocationBar() : nullptr;
++  if (!location_bar) {
++    return false;
++  }
++  location_bar->StartNewTabSearch({.index = index,
++                                   .group = group,
++                                   .pinned = pinned,
++                                   .on_opened = std::move(on_opened)});
++  return true;
++}
++
+ content::WebContents& NewTab(BrowserWindowInterface* browser,
+                              NewTabTypes context) {
+   if (context != NewTabTypes::kNoUserAction) {
+@@ -1833,6 +1872,41 @@ void NewSplitTab(BrowserWindowInterface*
+                  split_tabs::SplitTabCreatedSource source) {
+   TabStripModel* const tab_strip_model = browser->GetTabStripModel();
+   const int active_index = tab_strip_model->active_index();
++  // A new tab search's result opens next to the active tab and splits with it.
++  if (active_index != TabStripModel::kNoTab &&
++      StartNewTabSearch(
++          browser, active_index + 1,
++          tab_strip_model->GetTabGroupForTab(active_index),
++          tab_strip_model->IsTabPinned(active_index),
++          base::BindRepeating(
++              [](base::WeakPtr<BrowserWindowInterface> browser,
++                 tabs::TabHandle partner, split_tabs::SplitTabLayout layout,
++                 split_tabs::SplitTabCreatedSource source,
++                 content::WebContents* contents) {
++                if (!browser || !partner.Get()) {
++                  return;
++                }
++                TabStripModel* const tab_strip_model =
++                    browser->GetTabStripModel();
++                const int partner_index =
++                    tab_strip_model->GetIndexOfTab(partner.Get());
++                if (partner_index == TabStripModel::kNoTab ||
++                    tab_strip_model->GetIndexOfWebContents(contents) ==
++                        TabStripModel::kNoTab) {
++                  return;
++                }
++                // The new tab is active, so it splits with `partner`.
++                tab_strip_model->AddToNewSplit(
++                    {partner_index}, split_tabs::SplitTabVisualData(layout),
++                    source);
++                tab_strip_model->ActivateTabAt(
++                    tab_strip_model->GetIndexOfWebContents(contents));
++              },
++              browser->GetWeakPtr(),
++              tab_strip_model->GetActiveTab()->GetHandle(), layout,
++              source))) {
++    return;
++  }
+   // In Incognito or Enterprise Isolated modes, we can't show the regular Split
+   // View NTP so default to the regular NTP which renders special content.
+   const GURL new_tab_url =
+@@ -1862,10 +1936,34 @@ void AddNewTabToGroup(BrowserWindowInter
+     return;
+   }
+ 
++  if (StartNewTabSearch(browser, -1, group_id)) {
++    return;
++  }
+   AddTabAt(browser, GURL(), -1, true, group_id);
+ }
+ 
+ void CreateNewTabGroup(BrowserWindowInterface* browser) {
++  if (StartNewTabSearch(
++          browser, -1, std::nullopt, /*pinned=*/false,
++          base::BindRepeating(
++              [](base::WeakPtr<BrowserWindowInterface> browser,
++                 content::WebContents* contents) {
++                if (!browser) {
++                  return;
++                }
++                TabStripModel* const tab_strip_model =
++                    browser->GetTabStripModel();
++                const int index =
++                    tab_strip_model->GetIndexOfWebContents(contents);
++                if (index != TabStripModel::kNoTab) {
++                  tab_strip_model->ExecuteContextMenuCommand(
++                      index, TabStripModel::ContextMenuCommand::
++                                 CommandAddToNewGroupFromMenuItem);
++                }
++              },
++              browser->GetWeakPtr()))) {
++    return;
++  }
+   NewTab(browser, NewTabTypes::kNewTabCommand);
+   browser->GetTabStripModel()->ExecuteContextMenuCommand(
+       browser->GetTabStripModel()->active_index(),
+@@ -1986,6 +2084,9 @@ void AddNewTabToRecentGroup(BrowserWindo
+     return;
+   }
+ 
++  if (StartNewTabSearch(browser, -1, group_id)) {
++    return;
++  }
+   AddTabAt(browser, GURL(), -1, true, group_id);
+ }
+ 
+--- a/chrome/browser/ui/browser_commands.h
++++ b/chrome/browser/ui/browser_commands.h
+@@ -129,6 +129,16 @@ void NewIncognitoWindow(Profile* profile
+ void CloseWindow(BrowserWindowInterface* browser);
+ content::WebContents& NewTab(BrowserWindowInterface* browser,
+                              NewTabTypes context);
++// Starts a new tab search in `browser` instead of opening a new tab, when that
++// is turned on: the omnibox is emptied, and its result opens in a new tab at
++// `index` in `group`, after which `on_opened` runs with it. Returns false if a
++// new tab should open instead.
++bool StartNewTabSearch(
++    BrowserWindowInterface* browser,
++    int index = -1,
++    std::optional<tab_groups::TabGroupId> group = std::nullopt,
++    bool pinned = false,
++    base::RepeatingCallback<void(content::WebContents*)> on_opened = {});
+ void NewTabToRight(BrowserWindowInterface* browser);
+ void NewTabFromClipboardURL(BrowserWindowInterface* browser);
+ void CloseTab(BrowserWindowInterface* browser);
+--- a/chrome/browser/ui/browser_tab_strip_model_delegate.cc
++++ b/chrome/browser/ui/browser_tab_strip_model_delegate.cc
+@@ -123,6 +123,12 @@ void BrowserTabStripModelDelegate::AddTa
+   chrome::AddTabAt(browser_, url, index, foreground, group, pinned);
+ }
+ 
++bool BrowserTabStripModelDelegate::StartNewTabSearch(
++    int index,
++    std::optional<tab_groups::TabGroupId> group) {
++  return chrome::StartNewTabSearch(browser_, index, group);
++}
++
+ BrowserWindowInterface* BrowserTabStripModelDelegate::CreateNewStripWithTabs(
+     std::vector<NewStripContents> tabs,
+     const gfx::Rect& window_bounds,
+--- a/chrome/browser/ui/browser_tab_strip_model_delegate.h
++++ b/chrome/browser/ui/browser_tab_strip_model_delegate.h
+@@ -44,6 +44,8 @@ class BrowserTabStripModelDelegate : pub
+                 bool foreground,
+                 std::optional<tab_groups::TabGroupId> group,
+                 bool pinned) override;
++  bool StartNewTabSearch(int index,
++                         std::optional<tab_groups::TabGroupId> group) override;
+   BrowserWindowInterface* CreateNewStripWithTabs(
+       std::vector<NewStripContents> tabs,
+       const gfx::Rect& window_bounds,
+--- a/chrome/browser/ui/location_bar/location_bar.h
++++ b/chrome/browser/ui/location_bar/location_bar.h
+@@ -10,6 +10,7 @@
+ #include <optional>
+ #include <string_view>
+ 
++#include "base/functional/callback.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/weak_ptr.h"
+ #include "base/observer_list.h"
+@@ -64,6 +65,9 @@ class LocationBar {
+     // The tab strip index, or -1 for where a new tab normally goes.
+     int index = -1;
+     std::optional<tab_groups::TabGroupId> group;
++    bool pinned = false;
++    // Runs with the tab once it opens, e.g. to put it in a split.
++    base::RepeatingCallback<void(content::WebContents*)> on_opened;
+   };
+ 
+   // Holds the details necessary to open the omnibox match via browser commands.
+--- a/chrome/browser/ui/tabs/tab_strip_model.cc
++++ b/chrome/browser/ui/tabs/tab_strip_model.cc
+@@ -2798,6 +2798,10 @@ void TabStripModel::ExecuteContextMenuCo
+       base::RecordAction(UserMetricsAction("TabContextMenu_NewTab"));
+       UMA_HISTOGRAM_ENUMERATION("Tab.NewTab", NewTabTypes::kNewTabContextMenu,
+                                 NewTabTypes::kNewTabEnumCount);
++      if (delegate()->StartNewTabSearch(context_index + 1,
++                                        GetTabGroupForTab(context_index))) {
++        break;
++      }
+       delegate()->AddTabAt(GURL(), context_index + 1, true,
+                            GetTabGroupForTab(context_index));
+       break;
+--- a/chrome/browser/ui/tabs/tab_strip_model_delegate.h
++++ b/chrome/browser/ui/tabs/tab_strip_model_delegate.h
+@@ -69,6 +69,13 @@ class TabStripModelDelegate {
+       std::optional<tab_groups::TabGroupId> group = std::nullopt,
+       bool pinned = false) = 0;
+ 
++  // Starts a new tab search instead of adding a new tab page at `index` in
++  // `group`, when that is turned on. Returns false if the tab should be added.
++  virtual bool StartNewTabSearch(int index,
++                                 std::optional<tab_groups::TabGroupId> group) {
++    return false;
++  }
++
+   // Asks for a new TabStripModel to be created and the given web contentses to
+   // be added to it. Its size and position are reflected in `window_bounds`.
+   // Returns the Browser object representing the newly created window and tab
+--- a/chrome/browser/ui/views/tabs/browser_tab_strip_controller.cc
++++ b/chrome/browser/ui/views/tabs/browser_tab_strip_controller.cc
+@@ -467,6 +467,9 @@ void BrowserTabStripController::OnDropIn
+ }
+ 
+ void BrowserTabStripController::CreateNewTab(NewTabTypes context) {
++  if (chrome::StartNewTabSearch(browser_view_->browser())) {
++    return;
++  }
+   chrome::NewTab(browser_view_->browser(), context);
+ }
+ 
+--- a/chrome/browser/ui/views/tabs/groups/tab_group_editor_bubble_view.cc
++++ b/chrome/browser/ui/views/tabs/groups/tab_group_editor_bubble_view.cc
+@@ -15,6 +15,7 @@
+ #include "base/containers/span.h"
+ #include "base/feature_list.h"
+ #include "base/functional/bind.h"
++#include "base/task/sequenced_task_runner.h"
+ #include "base/i18n/rtl.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/metrics/histogram_functions.h"
+@@ -936,10 +937,27 @@ void TabGroupEditorBubbleView::NewTabInG
+       base::UserMetricsAction("TabGroups_TabGroupBubble_NewTabInGroup"));
+   TabStripModel* const model = browser_->GetTabStripModel();
+   const auto tabs = model->group_model()->GetTabGroup(group_)->ListTabs();
+-  model->delegate()->AddTabAt(GURL(), tabs.end(), true, group_);
+   // Close the widget to allow users to continue their work in their newly
+-  // created tab.
++  // created tab. The tab opens once the bubble is gone, so that giving focus
++  // back as it closes doesn't end a new tab search.
+   GetWidget()->Close();
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE,
++      base::BindOnce(
++          [](base::WeakPtr<BrowserWindowInterface> browser, int index,
++             tab_groups::TabGroupId group) {
++            if (!browser) {
++              return;
++            }
++            TabStripModel* const model = browser->GetTabStripModel();
++            if (!model->group_model()->ContainsTabGroup(group)) {
++              return;
++            }
++            if (!model->delegate()->StartNewTabSearch(index, group)) {
++              model->delegate()->AddTabAt(GURL(), index, true, group);
++            }
++          },
++          browser_->GetWeakPtr(), static_cast<int>(tabs.end()), group_));
+ }
+ 
+ void TabGroupEditorBubbleView::HomePressed() {
+--- a/chrome/browser/ui/views/toolbar/toolbar_view.cc
++++ b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+@@ -1777,6 +1777,9 @@ void ToolbarView::OnThemeChanged() {
+ }
+ 
+ void ToolbarView::NewTabButtonPressed(const ui::Event& event) {
++  if (chrome::StartNewTabSearch(browser_)) {
++    return;
++  }
+   chrome::NewTab(browser_, NewTabTypes::kNewTabButton);
+ }
+ 

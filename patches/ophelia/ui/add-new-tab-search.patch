@@ -1,0 +1,276 @@
+--- a/chrome/browser/extensions/api/settings_private/prefs_util.cc
++++ b/chrome/browser/extensions/api/settings_private/prefs_util.cc
+@@ -335,6 +335,8 @@ const PrefsUtil::TypedPrefMap& PrefsUtil
+       settings_api::PrefType::kBoolean;
+   (*s_allowlist)[::prefs::kHeliumSquareWebCorners] =
+       settings_api::PrefType::kBoolean;
++  (*s_allowlist)[::prefs::kHeliumNewTabSearch] =
++      settings_api::PrefType::kBoolean;
+ 
+   (*s_allowlist)[::prefs::kShowHomeButton] = settings_api::PrefType::kBoolean;
+   (*s_allowlist)[contextual_search::kDriveConsentState] =
+--- a/chrome/browser/ui/browser_commands.cc
++++ b/chrome/browser/ui/browser_commands.cc
+@@ -1286,6 +1286,16 @@ base::WeakPtr<content::NavigationHandle>
+   // opener.
+   params.tabstrip_add_types =
+       AddTabTypes::ADD_FORCE_INDEX | AddTabTypes::ADD_INHERIT_OPENER;
++  // A new tab search opens its tab where the new tab would have gone.
++  if (const std::optional<LocationBar::NewTabSearch> new_tab_search =
++          location_bar->new_tab_search();
++      new_tab_search &&
++      params.disposition == WindowOpenDisposition::NEW_FOREGROUND_TAB) {
++    params.tabstrip_index = new_tab_search->index;
++    params.group = new_tab_search->group;
++    params.tabstrip_add_types = AddTabTypes::ADD_ACTIVE;
++    location_bar->set_new_tab_search(std::nullopt);
++  }
+   params.input_start =
+       location_bar->navigation_params().match_selection_timestamp;
+   params.is_using_https_as_default_scheme =
+--- a/chrome/browser/ui/browser_ui_prefs.cc
++++ b/chrome/browser/ui/browser_ui_prefs.cc
+@@ -136,6 +136,7 @@ void RegisterBrowserUserPrefs(user_prefs
+ 
+   registry->RegisterBooleanPref(prefs::kHeliumRoundedFrame, true);
+   registry->RegisterBooleanPref(prefs::kHeliumSquareWebCorners, false);
++  registry->RegisterBooleanPref(prefs::kHeliumNewTabSearch, false);
+ 
+   registry->RegisterBooleanPref(prefs::kHeliumNativeFrameMaterials, false);
+ 
+--- a/chrome/browser/ui/location_bar/location_bar.h
++++ b/chrome/browser/ui/location_bar/location_bar.h
+@@ -7,6 +7,7 @@
+ 
+ #include <stddef.h>
+ 
++#include <optional>
+ #include <string_view>
+ 
+ #include "base/memory/raw_ptr.h"
+@@ -14,6 +15,7 @@
+ #include "base/observer_list.h"
+ #include "base/scoped_observation_traits.h"
+ #include "base/time/time.h"
++#include "components/tab_groups/tab_group_id.h"
+ #include "ui/base/page_transition_types.h"
+ #include "ui/base/window_open_disposition.h"
+ #include "ui/gfx/geometry/rect.h"
+@@ -56,6 +58,14 @@ class Widget;
+ // location bar to be mocked for testing.
+ class LocationBar {
+  public:
++  // Where the tab opened by a new tab search goes. A new tab search stands in
++  // for a new tab: the omnibox is emptied, and its result opens in a new tab.
++  struct NewTabSearch {
++    // The tab strip index, or -1 for where a new tab normally goes.
++    int index = -1;
++    std::optional<tab_groups::TabGroupId> group;
++  };
++
+   // Holds the details necessary to open the omnibox match via browser commands.
+   struct NavigationParams {
+     GURL destination_url;
+@@ -83,6 +93,21 @@ class LocationBar {
+     navigation_params_ = navigation_params;
+   }
+ 
++  // The new tab search in progress, if any.
++  const std::optional<NewTabSearch>& new_tab_search() const {
++    return new_tab_search_;
++  }
++  void set_new_tab_search(std::optional<NewTabSearch> new_tab_search) {
++    new_tab_search_ = new_tab_search;
++  }
++
++  // Starts a new tab search, or updates where its tab goes if one is in
++  // progress.
++  virtual void StartNewTabSearch(NewTabSearch new_tab_search) {}
++
++  // Ends the new tab search in progress, if any, and puts back the page's URL.
++  virtual void CancelNewTabSearch() {}
++
+   // Focuses the location bar. User-initiated focuses (like pressing Ctrl+L)
+   // should have |is_user_initiated| set to true. In those cases, we want to
+   // take some extra steps, like selecting everything and maybe uneliding.
+@@ -247,6 +272,7 @@ class LocationBar {
+ 
+  private:
+   NavigationParams navigation_params_;
++  std::optional<NewTabSearch> new_tab_search_;
+   const raw_ptr<CommandUpdater, DanglingUntriaged> command_updater_;
+   base::ObserverList<Observer> observers_;
+   base::WeakPtrFactory<LocationBar> weak_ptr_factory_{this};
+--- a/chrome/browser/ui/omnibox/chrome_omnibox_client.cc
++++ b/chrome/browser/ui/omnibox/chrome_omnibox_client.cc
+@@ -514,6 +514,12 @@ GURL ChromeOmniboxClient::GetContextualT
+ 
+ metrics::OmniboxEventProto::PageClassification
+ ChromeOmniboxClient::GetPageClassification(bool is_prefetch) const {
++  // A new tab search gets the suggestions of a new tab page, which don't
++  // depend on the current page.
++  if (IsNewTabSearch()) {
++    return metrics::OmniboxEventProto::
++        INSTANT_NTP_WITH_OMNIBOX_AS_STARTING_FOCUS;
++  }
+   return location_bar_->GetLocationBarModel()->GetPageClassification(
+       is_prefetch);
+ }
+@@ -933,6 +939,14 @@ void ChromeOmniboxClient::FocusWebConten
+   }
+ }
+ 
++bool ChromeOmniboxClient::IsNewTabSearch() const {
++  return location_bar_->new_tab_search().has_value();
++}
++
++void ChromeOmniboxClient::CancelNewTabSearch() {
++  location_bar_->CancelNewTabSearch();
++}
++
+ void ChromeOmniboxClient::OnNavigationLikely(
+     size_t index,
+     const AutocompleteMatch& match,
+--- a/chrome/browser/ui/omnibox/chrome_omnibox_client.h
++++ b/chrome/browser/ui/omnibox/chrome_omnibox_client.h
+@@ -125,6 +125,8 @@ class ChromeOmniboxClient final : public
+   void OnBookmarkLaunched() override;
+   void DiscardNonCommittedNavigations() override;
+   void FocusWebContents() override;
++  bool IsNewTabSearch() const override;
++  void CancelNewTabSearch() override;
+   void OnNavigationLikely(
+       size_t index,
+       const AutocompleteMatch& match,
+--- a/chrome/browser/ui/omnibox/omnibox_edit_model.cc
++++ b/chrome/browser/ui/omnibox/omnibox_edit_model.cc
+@@ -1356,6 +1356,21 @@ void OmniboxEditModel::OnKillFocus() {
+ bool OmniboxEditModel::OnEscapeKeyPressed() {
+   const char* kOmniboxEscapeHistogramName = "Omnibox.Escape";
+ 
++  // A new tab search is cancelled in one press, putting back the page's URL.
++  if (controller_->client()->IsNewTabSearch()) {
++#if !BUILDFLAG(IS_ANDROID)
++    if (controller_->IsPopupOpen()) {
++      if (auto* popup_closer = controller_->client()->GetOmniboxPopupCloser()) {
++        popup_closer->CloseWithReason(
++            omnibox::PopupCloseReason::kEscapeKeyPressed);
++      }
++    }
++#endif
++    controller_->client()->CancelNewTabSearch();
++    controller_->client()->FocusWebContents();
++    return true;
++  }
++
+   // If there is temporary text (i.e. a non default suggestion is selected),
+   // revert it.
+   if (has_temporary_text_) {
+@@ -2791,6 +2806,11 @@ void OmniboxEditModel::OpenMatch(
+   // is needed earlier for metrics.
+   bool is_tab_switch_action =
+       action && action->ActionId() == OmniboxActionId::TAB_SWITCH;
++  // A new tab search stands in for a new tab, so its result opens in one.
++  if (controller_->client()->IsNewTabSearch() &&
++      disposition == WindowOpenDisposition::CURRENT_TAB) {
++    disposition = WindowOpenDisposition::NEW_FOREGROUND_TAB;
++  }
+   if (is_open_tab_match || is_tab_switch_action) {
+     disposition = WindowOpenDisposition::SWITCH_TO_TAB;
+   }
+--- a/chrome/browser/ui/views/location_bar/location_bar_view.cc
++++ b/chrome/browser/ui/views/location_bar/location_bar_view.cc
+@@ -1683,6 +1683,8 @@ void LocationBarView::UpdateContentSetti
+ }
+ 
+ void LocationBarView::SaveStateToContents(WebContents* contents) {
++  // A new tab search belongs to no tab, so it ends on a tab switch.
++  CancelNewTabSearch();
+   if (base::FeatureList::IsEnabled(omnibox::kWebUIOmniboxFullPopup)) {
+     omnibox_popup_view_->SaveStateToTab(contents);
+   } else {
+@@ -1690,6 +1692,29 @@ void LocationBarView::SaveStateToContent
+   }
+ }
+ 
++void LocationBarView::StartNewTabSearch(NewTabSearch new_tab_search) {
++  const bool in_progress = this->new_tab_search().has_value();
++  set_new_tab_search(new_tab_search);
++  if (in_progress) {
++    // Keep what was typed, selected.
++    FocusLocation(/*is_user_initiated=*/true, /*clear_focus_if_failed=*/false);
++    return;
++  }
++  omnibox_view_->SetUserText(std::u16string(), /*update_popup=*/false);
++  FocusLocation(/*is_user_initiated=*/true, /*clear_focus_if_failed=*/false);
++  // Focusing doesn't ask for suggestions while input is in progress.
++  GetOmniboxController()->edit_model()->StartZeroSuggestRequest(
++      /*user_clobbered_permanent_text=*/true);
++}
++
++void LocationBarView::CancelNewTabSearch() {
++  if (!new_tab_search()) {
++    return;
++  }
++  set_new_tab_search(std::nullopt);
++  omnibox_view_->RevertAll();
++}
++
+ LocationBarTesting* LocationBarView::GetLocationBarForTesting() {
+   return this;
+ }
+--- a/chrome/browser/ui/views/location_bar/location_bar_view.h
++++ b/chrome/browser/ui/views/location_bar/location_bar_view.h
+@@ -202,6 +202,8 @@ class LocationBarView
+   void FocusLocation(bool is_user_initiated,
+                      bool clear_focus_if_failed) override;
+   void Revert() override;
++  void StartNewTabSearch(NewTabSearch new_tab_search) override;
++  void CancelNewTabSearch() override;
+   OmniboxView* GetOmniboxView() override;
+   OmniboxPopupView* GetOmniboxPopupView() override;
+   OmniboxPopupPresenterDelegate* GetPresenterDelegate() override;
+--- a/chrome/browser/ui/views/omnibox/omnibox_view_views.cc
++++ b/chrome/browser/ui/views/omnibox/omnibox_view_views.cc
+@@ -1855,6 +1855,11 @@ void OmniboxViewViews::OnBlur() {
+   // new tab page and then deleting everything using backspace/delete.
+   //
+   // This should never exit keyword mode.
++  //
++  // A new tab search ends the same way, whatever was typed.
++  if (location_bar_view_ && GetWidget() && GetWidget()->IsActive()) {
++    location_bar_view_->CancelNewTabSearch();
++  }
+   if (GetWidget() && GetWidget()->IsActive() &&
+       !controller()->edit_model()->is_keyword_selected()) {
+     if ((!controller()->edit_model()->user_input_in_progress() &&
+--- a/chrome/common/pref_names.h
++++ b/chrome/common/pref_names.h
+@@ -631,6 +631,11 @@ inline constexpr char kHeliumSquareUiCor
+ inline constexpr char kHeliumSquareWebCorners[] =
+     "helium.browser.square_web_corners";
+ 
++// A boolean pref set to true if asking for a new tab should empty and focus
++// the omnibox, opening its result in a new tab, instead of opening a blank
++// tab.
++inline constexpr char kHeliumNewTabSearch[] = "helium.browser.new_tab_search";
++
+ // A boolean pref set to true if browser frame surfaces should use native system
+ // materials instead of opaque fills.
+ inline constexpr char kHeliumNativeFrameMaterials[] =
+--- a/components/omnibox/browser/omnibox_client.h
++++ b/components/omnibox/browser/omnibox_client.h
+@@ -348,6 +348,13 @@ class OmniboxClient {
+   // Focuses the `WebContents`, i.e. the web page of the current tab.
+   virtual void FocusWebContents() {}
+ 
++  // Whether the omnibox stands in for a new tab, so that its result opens in
++  // a new tab.
++  virtual bool IsNewTabSearch() const { return false; }
++
++  // Ends the new tab search in progress, if any, and puts back the page's URL.
++  virtual void CancelNewTabSearch() {}
++
+   // Called when the user presses the thumbs down button on a suggestion.
+   // Displays the Feedback form for submitting detailed feedback on why they
+   // disliked the suggestion.

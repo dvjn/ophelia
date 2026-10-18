@@ -1,0 +1,40 @@
+--- a/chrome/app/settings_strings.grdp
++++ b/chrome/app/settings_strings.grdp
+@@ -292,6 +292,12 @@
+     <message name="IDS_SETTINGS_SQUARE_WEB_CORNERS_DESCRIPTION" desc="Description for the toggle which removes rounded corners from websites.">
+       Removes rounded corners from every element on every website
+     </message>
++    <message name="IDS_SETTINGS_NEW_TAB_SEARCH" desc="Label for the toggle which makes asking for a new tab focus the address bar instead of opening a blank tab.">
++      Open a search instead of a new tab
++    </message>
++    <message name="IDS_SETTINGS_NEW_TAB_SEARCH_DESCRIPTION" desc="Description for the toggle which makes asking for a new tab focus the address bar instead of opening a blank tab.">
++      New tab empties the address bar, and what you open from it goes in a new tab. Press Esc to cancel.
++    </message>
+     <message name="IDS_SETTINGS_NATIVE_FRAME_MATERIALS" desc="Label for the toggle which enables or disables native system materials on the browser frame.">
+       Use native frame materials (experimental)
+     </message>
+--- a/chrome/browser/resources/settings/appearance_page/appearance_page.html.ts
++++ b/chrome/browser/resources/settings/appearance_page/appearance_page.html.ts
+@@ -134,6 +134,11 @@ export function getHtml(this: SettingsAp
+         sub-label="$i18n{squareWebCornersDescription}">
+     </settings-toggle-button>
+     <settings-toggle-button class="hr"
++        pref-key="helium.browser.new_tab_search"
++        label="$i18n{newTabSearch}"
++        sub-label="$i18n{newTabSearchDescription}">
++    </settings-toggle-button>
++    <settings-toggle-button class="hr"
+         ?hidden="${!this.showNativeFrameMaterialsOption_}"
+         pref-key="helium.browser.native_frame_materials"
+         label="$i18n{nativeFrameMaterials}"
+--- a/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
++++ b/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
+@@ -606,6 +606,8 @@ void AddAppearanceStrings(content::WebUI
+       {"squareWebCorners", IDS_SETTINGS_SQUARE_WEB_CORNERS},
+       {"squareWebCornersDescription",
+        IDS_SETTINGS_SQUARE_WEB_CORNERS_DESCRIPTION},
++      {"newTabSearch", IDS_SETTINGS_NEW_TAB_SEARCH},
++      {"newTabSearchDescription", IDS_SETTINGS_NEW_TAB_SEARCH_DESCRIPTION},
+       {"nativeFrameMaterials", IDS_SETTINGS_NATIVE_FRAME_MATERIALS},
+       {"nativeFrameMaterialsDescription",
+        IDS_SETTINGS_NATIVE_FRAME_MATERIALS_DESCRIPTION},

@@ -24,3 +24,6 @@ ophelia/containers/restore-session-storage-in-containers.patch
 ophelia/containers/keep-containers-in-saved-tab-groups.patch
 ophelia/ui/square-browser-ui-corners.patch
 ophelia/ui/square-website-corners.patch
+ophelia/ui/add-new-tab-search.patch
+ophelia/ui/open-new-tab-search-for-new-tabs.patch
+ophelia/ui/add-new-tab-search-setting.patch
